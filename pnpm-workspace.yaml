@@ -1,0 +1,7 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+  - 'backend'
+
+allowBuilds:
+  esbuild: true

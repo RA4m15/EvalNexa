@@ -1,0 +1,22 @@
+{
+  "name": "evalnexa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EvalNexa – AI-Powered Digital Examination & On-Screen Marking Platform",
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter backend dev\" \"pnpm --filter control-center dev\" \"pnpm --filter examiner dev\" \"pnpm --filter moderation dev\"",
+    "dev:backend": "pnpm --filter backend dev",
+    "dev:server": "pnpm --filter backend dev",
+    "dev:control-center": "pnpm --filter control-center dev",
+    "dev:examiner": "pnpm --filter examiner dev",
+    "dev:moderation": "pnpm --filter moderation dev",
+    "build": "pnpm -r build",
+    "seed": "pnpm --filter backend seed",
+    "create-admin": "pnpm --filter backend create-admin",
+    "seed-users": "pnpm --filter backend seed-users"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.4.5"
+  }
+}
