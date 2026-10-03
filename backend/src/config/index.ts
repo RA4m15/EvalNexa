@@ -29,4 +29,10 @@ export const config = {
     'http://127.0.0.1:5174',
     'http://127.0.0.1:5175',
   ],
+  cloudinary: {
+    cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+    apiKey: process.env.CLOUDINARY_API_KEY || '',
+    apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+  },
+  ingestionApiKey: process.env.INGESTION_API_KEY || '',
 };

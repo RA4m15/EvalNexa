@@ -2,14 +2,14 @@ import { useEffect } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { getSocket } from '../lib/socket';
 
-export function useSocketEvents(events: Record<string, () => void>) {
+export function useSocketEvents(events: Record<string, (payload?: any) => void>) {
   const queryClient = useQueryClient();
 
   useEffect(() => {
     const socket = getSocket();
     if (!socket) return;
 
-    const handlers: Array<[string, () => void]> = Object.entries(events);
+    const handlers: Array<[string, (payload?: any) => void]> = Object.entries(events);
     handlers.forEach(([event, handler]) => {
       socket.on(event, handler);
     });

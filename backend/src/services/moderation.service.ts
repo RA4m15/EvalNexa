@@ -8,10 +8,12 @@ import { emitToAll } from '../sockets';
 
 export async function fetchModerationQueue(status?: string) {
   const filter: Record<string, unknown> = {};
-  if (status) {
+  if (status && status !== 'ALL') {
     filter.status = status;
-  } else {
+  } else if (!status) {
     filter.status = { $in: ['SUBMITTED', 'UNDER_REVIEW'] };
+  } else if (status === 'ALL') {
+    filter.status = { $in: ['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'RETURNED'] };
   }
 
   return Evaluation.find(filter)
@@ -55,7 +57,38 @@ export async function fetchModerationById(id: string) {
     .populate('moderatorId', 'name email')
     .sort({ createdAt: -1 });
 
-  return { evaluation, moderationHistory };
+  // Check if a second evaluation exists for the same answer book
+  const answerBookId = (evaluation.answerBookId as any)?._id || evaluation.answerBookId;
+  const secondEvaluation = await Evaluation.findOne({
+    answerBookId,
+    _id: { $ne: evaluation._id },
+    status: { $in: ['SUBMITTED', 'APPROVED', 'UNDER_REVIEW'] },
+  }).populate('examinerId', 'name email');
+
+  return { evaluation, moderationHistory, secondEvaluation };
+}
+
+export async function fetchModeratorHistory(moderatorId?: string) {
+  const filter: Record<string, unknown> = {};
+  if (moderatorId) {
+    filter.moderatorId = moderatorId;
+  }
+  return Moderation.find(filter)
+    .populate({
+      path: 'evaluationId',
+      populate: [
+        {
+          path: 'answerBookId',
+          populate: { path: 'examId', select: 'title subjectCode subjectName maximumMarks' },
+        },
+        {
+          path: 'examinerId',
+          select: 'name email',
+        },
+      ],
+    })
+    .populate('moderatorId', 'name email')
+    .sort({ createdAt: -1 });
 }
 
 export async function approveEvaluationByModerator(id: string, moderatorId: string) {

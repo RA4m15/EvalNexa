@@ -103,3 +103,19 @@ export async function getExaminerAnalytics(_req: AuthRequest, res: Response): Pr
     });
   }
 }
+
+export async function getModeratorHistory(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const isGlobal = req.user!.role === 'ADMIN';
+    const history = await moderationService.fetchModeratorHistory(
+      isGlobal ? undefined : req.user!._id.toString()
+    );
+    res.json({ success: true, data: history });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to fetch moderation history',
+      code: error.code || 'FETCH_HISTORY_ERROR',
+    });
+  }
+}

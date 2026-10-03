@@ -26,8 +26,8 @@ export function LoginPage() {
       {/* LEFT — Editorial hero */}
       <div className="login-hero">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
-          <div style={{ fontFamily: 'var(--font-classical)', fontSize: '8.5px', fontWeight: 700, letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--gold)' }}>
-            EvalNexa Archival Docket // Moderation Centre
+          <div style={{ fontFamily: '"Cambria"', fontSize: '12px', fontWeight: 700, letterSpacing: '0.12em', textTransform: 'uppercase', color: 'var(--gold)' }}>
+            EvalNexa Archival Docket // Moderation Center
           </div>
           <h1 className="login-hero__headline">
             Evaluation Integrity,
@@ -35,7 +35,7 @@ export function LoginPage() {
             <em>Immutably Verified.</em>
           </h1>
           <p className="login-hero__description">
-            The Moderation Centre ensures all submitted evaluations meet institutional
+            The Moderation Center ensures all submitted evaluations meet institutional
             quality standards before results are finalised. Review, approve, or return
             evaluations with full audit traceability.
           </p>
@@ -46,7 +46,7 @@ export function LoginPage() {
         <div className="login-hero__meta">
           <div className="login-hero__meta-item">
             <span className="login-hero__meta-label">Interface</span>
-            <span className="login-hero__meta-value">Moderation Centre</span>
+            <span className="login-hero__meta-value">Moderation Center</span>
           </div>
           <div className="login-hero__meta-item">
             <span className="login-hero__meta-label">Access</span>
@@ -71,15 +71,15 @@ export function LoginPage() {
             <label className="form-label" htmlFor="mod-password">2. Security Passkey</label>
             <input id="mod-password" type="password" className="form-input" value={password}
               onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••••••" required
-              style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.12em', color: 'var(--burgundy)' }} />
+              style={{ fontFamily: '"Cambria"', letterSpacing: '0.12em', color: 'var(--burgundy)' }} />
           </div>
           {error && (
-            <div style={{ padding: '10px 14px', background: 'rgba(92,29,36,0.06)', border: '1px solid rgba(92,29,36,0.2)', fontFamily: 'var(--font-mono)', fontSize: '9.5px', color: 'var(--burgundy)' }}>
+            <div style={{ padding: '10px 14px', background: 'rgba(92,29,36,0.06)', border: '1px solid rgba(92,29,36,0.2)', fontFamily: '"Cambria"', fontSize: '13px', color: 'var(--burgundy)' }}>
               ⚠ {error}
             </div>
           )}
           <button type="submit" className="login-submit" disabled={isLoading}>
-            <span>{isLoading ? 'Authorising Moderation Folio…' : 'Authorise & Open Moderation Centre'}</span>
+            <span>{isLoading ? 'Authorising Moderation Folio…' : 'Authorise & Open Moderation Center'}</span>
             <span className="login-submit__bracket">[↵ ENTER]</span>
           </button>
         </form>

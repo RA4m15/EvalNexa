@@ -31,9 +31,12 @@ async function run() {
 
   // 1. Admin Login
   console.log('1. Authenticating Admin...');
+  const adminEmail = process.env.SEED_ADMIN_EMAIL || process.env.ADMIN_EMAIL || 'admin@evalnexa.edu';
+  const adminPassword = process.env.SEED_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
+  if (!adminPassword) throw new Error('Missing SEED_ADMIN_PASSWORD environment variable for test execution');
   const adminAuth = await request('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'admin@evalnexa.edu', password: process.env.ADMIN_PASSWORD || 'Admin@1234' }),
+    body: JSON.stringify({ email: adminEmail, password: adminPassword }),
   });
   const adminToken = adminAuth.data.token;
   console.log('✓ Admin authenticated:', adminAuth.data.user.name);
@@ -103,9 +106,10 @@ async function run() {
   const answerBookId = ab.data._id;
   console.log(`✓ Answer book registered: Code ${ab.data.answerBookCode}, Status: ${ab.data.status}, Quality: ${ab.data.qualityStatus}`);
 
-  // Get Examiner ID
+  // Get Examiner ID matching login credentials
+  const examinerEmail = process.env.SEED_EXAMINER_EMAIL || process.env.EXAMINER_EMAIL || 'examiner@evalnexa.edu';
   const examinersList = await request('/users?role=EXAMINER', {}, adminToken);
-  const examinerUser = examinersList.data[0];
+  const examinerUser = examinersList.data.find((e: any) => e.email.toLowerCase() === examinerEmail.toLowerCase()) || examinersList.data[0];
   if (!examinerUser) throw new Error('No examiner found in database');
   console.log(`✓ Target examiner selected: ${examinerUser.name} (${examinerUser.email})`);
 
@@ -119,9 +123,11 @@ async function run() {
 
   // 6. Examiner Login
   console.log('\n6. Authenticating Examiner...');
+  const examinerPassword = process.env.SEED_EXAMINER_PASSWORD || process.env.EXAMINER_PASSWORD;
+  if (!examinerPassword) throw new Error('Missing SEED_EXAMINER_PASSWORD environment variable for test execution');
   const examinerAuth = await request('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'examiner@evalnexa.edu', password: process.env.EXAMINER_PASSWORD || 'Examiner@5678' }),
+    body: JSON.stringify({ email: examinerEmail, password: examinerPassword }),
   });
   const examinerToken = examinerAuth.data.token;
   console.log('✓ Examiner authenticated:', examinerAuth.data.user.name);
@@ -171,9 +177,12 @@ async function run() {
 
   // 11. Moderator Login
   console.log('\n11. Authenticating Moderator...');
+  const modEmail = process.env.SEED_MODERATOR_EMAIL || process.env.MODERATOR_EMAIL || 'moderator@evalnexa.edu';
+  const modPassword = process.env.SEED_MODERATOR_PASSWORD || process.env.MODERATOR_PASSWORD;
+  if (!modPassword) throw new Error('Missing SEED_MODERATOR_PASSWORD environment variable for test execution');
   const modAuth = await request('/auth/login', {
     method: 'POST',
-    body: JSON.stringify({ email: 'moderator@evalnexa.edu', password: process.env.MODERATOR_PASSWORD || 'Moderator@9012' }),
+    body: JSON.stringify({ email: modEmail, password: modPassword }),
   });
   const modToken = modAuth.data.token;
   console.log('✓ Moderator authenticated:', modAuth.data.user.name);

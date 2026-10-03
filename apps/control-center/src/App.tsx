@@ -10,7 +10,9 @@ import { AnswerBooksPage } from './pages/AnswerBooksPage';
 import { ScanCenterPage } from './pages/ScanCenterPage';
 import { AssignmentsPage } from './pages/AssignmentsPage';
 import { MonitoringPage } from './pages/MonitoringPage';
+import { ModerationOverviewPage } from './pages/ModerationOverviewPage';
 import { ResultsPage } from './pages/ResultsPage';
+import { AuditPage } from './pages/AuditPage';
 import { UsersPage } from './pages/UsersPage';
 
 export function App() {
@@ -30,9 +32,12 @@ export function App() {
                 <Route path="exams/:id" element={<ExamDetailPage />} />
                 <Route path="answer-books" element={<AnswerBooksPage />} />
                 <Route path="scan-center" element={<ScanCenterPage />} />
+                <Route path="scan" element={<Navigate to="/scan-center" replace />} />
                 <Route path="assignments" element={<AssignmentsPage />} />
                 <Route path="monitoring" element={<MonitoringPage />} />
+                <Route path="moderation" element={<ModerationOverviewPage />} />
                 <Route path="results" element={<ResultsPage />} />
+                <Route path="audit" element={<AuditPage />} />
                 <Route path="users" element={<UsersPage />} />
                 <Route path="*" element={<Navigate to="/dashboard" replace />} />
               </Routes>

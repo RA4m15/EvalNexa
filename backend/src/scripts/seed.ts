@@ -21,29 +21,31 @@ import { Moderation } from '../models/Moderation';
 import { AuditLog } from '../models/AuditLog';
 import { config } from '../config';
 
+const devDefaultPass = process.env.SEED_ADMIN_PASSWORD || process.env.DEV_PASSWORD || 'DevPassword@2025';
+
 const SEED_USERS = [
   {
     name: 'System Administrator',
-    email: 'admin@evalnexa.dev',
-    password: 'Admin@1234',
+    email: process.env.SEED_ADMIN_EMAIL || 'admin@evalnexa.dev',
+    password: process.env.SEED_ADMIN_PASSWORD || devDefaultPass,
     role: 'ADMIN' as const,
   },
   {
     name: 'Dr. Sarah Mitchell',
-    email: 'examiner@evalnexa.dev',
-    password: 'Examiner@1234',
+    email: process.env.SEED_EXAMINER_EMAIL || 'examiner@evalnexa.dev',
+    password: process.env.SEED_EXAMINER_PASSWORD || devDefaultPass,
     role: 'EXAMINER' as const,
   },
   {
     name: 'Prof. Marcus Vance',
     email: 'examiner2@evalnexa.dev',
-    password: 'Examiner@1234',
+    password: process.env.SEED_EXAMINER_PASSWORD || devDefaultPass,
     role: 'EXAMINER' as const,
   },
   {
     name: 'Prof. James Harrington',
-    email: 'moderator@evalnexa.dev',
-    password: 'Moderator@1234',
+    email: process.env.SEED_MODERATOR_EMAIL || 'moderator@evalnexa.dev',
+    password: process.env.SEED_MODERATOR_PASSWORD || devDefaultPass,
     role: 'MODERATOR' as const,
   },
 ];
@@ -442,14 +444,9 @@ async function seed() {
   console.log('✅  EvalNexa seed completed successfully!');
   console.log('════════════════════════════════════════════════════════\n');
   console.log('🔐  Ready-to-use Role Accounts:');
-  console.log('   ┌─────────────┬───────────────────────────┬───────────────┐');
-  console.log('   │ Role        │ Email                     │ Password      │');
-  console.log('   ├─────────────┼───────────────────────────┼───────────────┤');
-  console.log('   │ ADMIN       │ admin@evalnexa.dev        │ Admin@1234    │');
-  console.log('   │ EXAMINER    │ examiner@evalnexa.dev     │ Examiner@1234 │');
-  console.log('   │ EXAMINER 2  │ examiner2@evalnexa.dev    │ Examiner@1234 │');
-  console.log('   │ MODERATOR   │ moderator@evalnexa.dev    │ Moderator@1234│');
-  console.log('   └─────────────┴───────────────────────────┴───────────────┘\n');
+  console.log('   - ADMIN:     admin@evalnexa.dev');
+  console.log('   - EXAMINER:  examiner@evalnexa.dev');
+  console.log('   - MODERATOR: moderator@evalnexa.dev\n');
 
   await mongoose.disconnect();
   process.exit(0);

@@ -7,6 +7,7 @@ import {
   getModeratorStats,
   getIntegrityChecks,
   getExaminerAnalytics,
+  getModeratorHistory,
 } from '../controllers/moderation.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -18,6 +19,7 @@ router.use(authenticate, authorize('MODERATOR', 'ADMIN'));
 
 router.get('/stats', getModeratorStats);
 router.get('/queue', getModerationQueue);
+router.get('/history', getModeratorHistory);
 router.get('/integrity-checks', getIntegrityChecks);
 router.get('/examiner-analytics', getExaminerAnalytics);
 router.get('/', getModerationQueue);

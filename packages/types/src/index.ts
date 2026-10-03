@@ -41,6 +41,18 @@ export interface Exam {
   updatedAt: string;
 }
 
+// --- Processing Status ---
+export type ProcessingStatus =
+  | 'RECEIVED'
+  | 'PROCESSING'
+  | 'QUALITY_REVIEW'
+  | 'RESCAN_REQUIRED'
+  | 'OCR_PROCESSING'
+  | 'FINALIZING'
+  | 'FINALIZED'
+  | 'READY_FOR_EVALUATION'
+  | 'ERROR';
+
 // --- Answer Book Status ---
 export type AnswerBookStatus =
   | 'READY'
@@ -53,11 +65,55 @@ export type AnswerBookStatus =
   | 'FINALIZED';
 
 export type QualityStatus =
+  | 'PENDING'
+  | 'PASSED'
+  | 'REVIEW_REQUIRED'
+  | 'RESCAN_REQUIRED'
+  | 'VERIFIED'
   | 'READY'
   | 'PROCESSING'
-  | 'QUALITY_REVIEW'
-  | 'RESCAN_REQUIRED'
-  | 'VERIFIED';
+  | 'QUALITY_REVIEW';
+
+// --- Cloudinary Asset Metadata ---
+export interface CloudinaryAssetMetadata {
+  publicId: string;
+  assetId?: string;
+  resourceType: string;
+  deliveryType?: string;
+  format?: string;
+  bytes?: number;
+  width?: number;
+  height?: number;
+  secureUrl?: string;
+}
+
+// --- Page OCR & Quality ---
+export interface PageOcrMetadata {
+  text?: string;
+  confidence?: number | null;
+  language?: string;
+}
+
+export interface PageQualityMetadata {
+  status: 'PENDING' | 'PASSED' | 'REVIEW_REQUIRED' | 'RESCAN_REQUIRED' | 'VERIFIED';
+  score?: number | null;
+  reviewedAt?: string;
+  reviewedBy?: string;
+}
+
+// --- Answer Page ---
+export interface AnswerPage {
+  _id: string;
+  answerBookId: string;
+  pageNumber: number;
+  cloudinary: CloudinaryAssetMetadata;
+  ocr?: PageOcrMetadata;
+  quality?: PageQualityMetadata;
+  processingStatus?: ProcessingStatus;
+  finalized: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
 
 // --- Answer Book ---
 export interface AnswerBook {
@@ -67,9 +123,17 @@ export interface AnswerBook {
   studentCode: string;
   pageCount: number;
   status: AnswerBookStatus;
+  processingStatus?: ProcessingStatus;
   qualityStatus?: QualityStatus;
   scanBatch?: string;
   pdfUrl?: string;
+  cloudinaryAsset?: {
+    publicId: string;
+    assetId?: string;
+    format?: string;
+    resourceType?: string;
+    secureUrl?: string;
+  };
   assignedExaminerId?: string | User;
   createdAt: string;
   updatedAt: string;
@@ -233,6 +297,12 @@ export type SocketEvent =
   | 'answerbook.created'
   | 'answerbook.assigned'
   | 'answerbook.status.changed'
+  | 'script.processing.updated'
+  | 'script.quality.updated'
+  | 'script.finalized'
+  | 'page.created'
+  | 'page.updated'
+  | 'page.deleted'
   | 'evaluation.started'
   | 'evaluation.updated'
   | 'evaluation.submitted'

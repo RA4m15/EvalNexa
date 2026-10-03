@@ -125,7 +125,7 @@ export function AuditPage() {
                       </td>
                       <td>
                         <span style={{
-                          fontFamily: 'var(--font-mono)',
+                          fontFamily: '"Cambria"',
                           fontSize: 10,
                           fontWeight: 600,
                           letterSpacing: '0.08em',
@@ -158,7 +158,7 @@ export function AuditPage() {
                             <summary style={{ cursor: 'pointer', fontSize: 11, color: 'var(--text-muted)' }}>View</summary>
                             <pre style={{
                               fontSize: 10,
-                              fontFamily: 'var(--font-mono)',
+                              fontFamily: '"Cambria"',
                               background: 'var(--bg-inset)',
                               padding: 'var(--space-2)',
                               borderRadius: 'var(--radius-sm)',

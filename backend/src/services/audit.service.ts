@@ -1,7 +1,9 @@
 import { AuditLog, IAuditLog } from '../models/AuditLog';
 
 export interface CreateAuditLogParams {
-  actorId: string | object;
+  actorId?: string | object | null;
+  actorName?: string;
+  actorRole?: string;
   action: string;
   entityType: string;
   entityId: string;

@@ -32,7 +32,7 @@ export function LoginPage() {
       <div className="login-hero">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
           <div style={{
-            fontFamily: 'var(--font-classical)',
+            fontFamily: '"Cambria"',
             fontSize: '8.5px',
             fontWeight: 700,
             letterSpacing: '0.2em',
@@ -83,10 +83,10 @@ export function LoginPage() {
             <label className="form-label" htmlFor="ex-password">2. Security Passkey</label>
             <input id="ex-password" type="password" className="form-input" value={password}
               onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••••••" required
-              style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.12em', color: 'var(--burgundy)' }} />
+              style={{ fontFamily: '"Cambria"', letterSpacing: '0.12em', color: 'var(--burgundy)' }} />
           </div>
           {error && (
-            <div style={{ padding: '10px 14px', background: 'rgba(92,29,36,0.06)', border: '1px solid rgba(92,29,36,0.2)', fontFamily: 'var(--font-mono)', fontSize: '9.5px', color: 'var(--burgundy)' }}>
+            <div style={{ padding: '10px 14px', background: 'rgba(92,29,36,0.06)', border: '1px solid rgba(92,29,36,0.2)', fontFamily: '"Cambria"', fontSize: '9.5px', color: 'var(--burgundy)' }}>
               ⚠ {error}
             </div>
           )}

@@ -114,21 +114,13 @@ pnpm --filter backend create-admin
 
 This interactive script creates the first ADMIN user. Credentials are stored securely (bcrypt-hashed) in MongoDB.
 
-### 5. (Optional) Seed Development Users
+### 5. Seed Panel Users
 
 ```bash
-pnpm --filter backend seed
+pnpm --filter backend seed-users
 ```
 
-Creates three development accounts:
-
-| Role      | Email                    | Password        |
-|-----------|--------------------------|-----------------|
-| ADMIN     | admin@evalnexa.dev       | Admin@1234      |
-| EXAMINER  | examiner@evalnexa.dev    | Examiner@1234   |
-| MODERATOR | moderator@evalnexa.dev   | Moderator@1234  |
-
-> ⚠️ Only run `seed` in development. It will refuse to run in production.
+Provisions role accounts (`ADMIN`, `EXAMINER`, `MODERATOR`) directly in MongoDB using your `SEED_*_EMAIL` and `SEED_*_PASSWORD` environment variables.
 
 ---
 

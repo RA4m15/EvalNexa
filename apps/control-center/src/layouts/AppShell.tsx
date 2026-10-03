@@ -2,15 +2,16 @@ import React from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 
+// 7 Essential Operational Navigation Items in strict lifecycle order (Sections 1 & 2):
+// SETUP → SCAN → VERIFY → ASSIGN → MONITOR → RESULT
 const NAV_ITEMS = [
   { label: 'Dashboard', to: '/dashboard' },
   { label: 'Examinations', to: '/exams' },
-  { label: 'Answer Books', to: '/answer-books' },
-  { label: 'Scan & Quality', to: '/scan-center' },
+  { label: 'Scan Center', to: '/scan-center' },
+  { label: 'Digital Scripts', to: '/answer-books' },
   { label: 'Assignment', to: '/assignments' },
   { label: 'Live Monitoring', to: '/monitoring' },
   { label: 'Results', to: '/results' },
-  { label: 'Users', to: '/users' },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -29,7 +30,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="app-topbar__logo">æ</div>
           <div className="app-topbar__identity">
             <span className="app-topbar__name">EvalNexa</span>
-            <span className="app-topbar__sub">// Examination Intelligence</span>
+            <span className="app-topbar__sub">// Examination Control</span>
           </div>
         </div>
 
@@ -47,8 +48,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="app-topbar__right">
           <div className="app-topbar__user">
-            <span>{user?.name}</span>
-            <span className="app-topbar__role-badge">{user?.role}</span>
+            <span>{user?.name || 'Administrator'}</span>
+            <span className="app-topbar__role-badge">{user?.role || 'ADMIN'}</span>
           </div>
           <button className="btn btn-ghost btn-sm" onClick={handleLogout}>
             Sign Out
@@ -57,7 +58,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </header>
 
       <div className="app-content">
-        {/* Watermark */}
+        {/* Soft watermark */}
         <div className="watermark-overlay" aria-hidden="true">
           <svg width="700" height="700" viewBox="0 0 400 400" fill="none">
             <circle cx="200" cy="200" r="190" stroke="currentColor" strokeDasharray="2 3" strokeWidth="0.75" />

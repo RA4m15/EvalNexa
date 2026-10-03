@@ -65,12 +65,14 @@ export async function fetchExaminerAnswerBooks(userId: string, status?: string) 
     assigned: 0,
     inProgress: 0,
     submitted: 0,
+    returned: 0,
   };
 
   answerBooks.forEach((ab) => {
     if (ab.status === 'ASSIGNED') stats.assigned++;
     if (ab.status === 'IN_PROGRESS') stats.inProgress++;
     if (['SUBMITTED', 'UNDER_REVIEW', 'APPROVED'].includes(ab.status)) stats.submitted++;
+    if (ab.status === 'RETURNED') stats.returned++;
   });
 
   return { answerBooks, stats };

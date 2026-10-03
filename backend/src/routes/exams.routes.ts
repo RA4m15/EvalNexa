@@ -24,9 +24,9 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/stats/dashboard', authorize('ADMIN'), getAdminDashboardStats);
-router.get('/', authorize('ADMIN', 'MODERATOR'), getExams);
+router.get('/', authorize('ADMIN', 'MODERATOR', 'EXAMINER'), getExams);
 router.post('/', authorize('ADMIN'), validate(createExamSchema), createExam);
-router.get('/:id', authorize('ADMIN', 'MODERATOR'), getExamById);
+router.get('/:id', authorize('ADMIN', 'MODERATOR', 'EXAMINER'), getExamById);
 router.patch('/:id', authorize('ADMIN'), validate(updateExamSchema), updateExam);
 router.delete('/:id', authorize('ADMIN'), deleteExam);
 

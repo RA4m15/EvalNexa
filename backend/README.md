@@ -61,7 +61,7 @@ Ensure `backend/.env` contains the required settings:
 PORT=5000
 NODE_ENV=development
 MONGODB_URI=mongodb://127.0.0.1:27017/evalnexa
-JWT_SECRET=evalnexa-dev-secret-change-in-prod
+JWT_SECRET=<strong-random-secret>
 JWT_EXPIRES_IN=7d
 
 # Frontend Origins
@@ -69,40 +69,32 @@ CONTROL_CENTER_ORIGIN=http://localhost:5173
 EXAMINER_ORIGIN=http://localhost:5174
 MODERATION_ORIGIN=http://localhost:5175
 
-# Dedicated Panel Credentials
-ADMIN_NAME=System Administrator
-ADMIN_EMAIL=admin@evalnexa.edu
-ADMIN_PASSWORD=Admin@1234
+# Dedicated Panel Seed Credentials (Set your own secure passwords)
+SEED_ADMIN_EMAIL=admin@evalnexa.edu
+SEED_ADMIN_PASSWORD=your-secure-admin-password
 
-EXAMINER_NAME=Dr. Sarah Mitchell
-EXAMINER_EMAIL=examiner@evalnexa.edu
-EXAMINER_PASSWORD=Examiner@5678
+SEED_EXAMINER_EMAIL=examiner@evalnexa.edu
+SEED_EXAMINER_PASSWORD=your-secure-examiner-password
 
-MODERATOR_NAME=Prof. James Harlow
-MODERATOR_EMAIL=moderator@evalnexa.edu
-MODERATOR_PASSWORD=Moderator@9012
+SEED_MODERATOR_EMAIL=moderator@evalnexa.edu
+SEED_MODERATOR_PASSWORD=your-secure-moderator-password
 ```
 
 ---
 
 ## 👥 Panel Credentials Setup
 
-EvalNexa includes a one-command seed utility that provisions dedicated credentials for each panel:
+EvalNexa includes a one-command seed utility that provisions dedicated credentials for each panel from your environment variables:
 
 ```bash
 pnpm --filter backend seed-users
 ```
 
-| Panel | URL | Email | Password | Role |
-|-------|-----|-------|----------|------|
-| **Control Center** | `http://localhost:5173` | `admin@evalnexa.edu` | `Admin@1234` | `ADMIN` |
-| **Examiner Workspace** | `http://localhost:5174` | `examiner@evalnexa.edu` | `Examiner@5678` | `EXAMINER` |
-| **Moderation Centre** | `http://localhost:5175` | `moderator@evalnexa.edu` | `Moderator@9012` | `MODERATOR` |
-
-To populate a complete development dataset (exams, questions, answer books, evaluations, moderation records, and audit logs):
-```bash
-pnpm --filter backend seed
-```
+| Panel | URL | Configured Role |
+|-------|-----|-----------------|
+| **Control Center** | `http://localhost:5173` | `ADMIN` |
+| **Examiner Workspace** | `http://localhost:5174` | `EXAMINER` |
+| **Moderation Centre** | `http://localhost:5175` | `MODERATOR` |
 
 ---
 

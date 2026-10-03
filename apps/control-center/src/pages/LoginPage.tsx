@@ -36,7 +36,7 @@ export function LoginPage() {
       <div className="login-hero">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--sp-4)' }}>
           <div style={{
-            fontFamily: 'var(--font-classical)',
+            fontFamily: '"Cambria"',
             fontSize: '8.5px',
             fontWeight: 700,
             letterSpacing: '0.2em',
@@ -117,7 +117,7 @@ export function LoginPage() {
               placeholder="••••••••••••••••"
               required
               autoComplete="current-password"
-              style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.12em', color: 'var(--burgundy)' }}
+              style={{ fontFamily: '"Cambria"', letterSpacing: '0.12em', color: 'var(--burgundy)' }}
             />
           </div>
 
@@ -126,7 +126,7 @@ export function LoginPage() {
               padding: '10px 14px',
               background: 'rgba(92,29,36,0.06)',
               border: '1px solid rgba(92,29,36,0.2)',
-              fontFamily: 'var(--font-mono)',
+              fontFamily: '"Cambria"',
               fontSize: '9.5px',
               color: 'var(--burgundy)',
               letterSpacing: '0.04em',
