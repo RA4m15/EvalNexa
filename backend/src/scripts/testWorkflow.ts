@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const API_BASE = 'http://localhost:5000/api';
+const API_BASE = process.env.API_BASE_URL || 'https://evalnexa.onrender.com/api';
 
 async function request(path: string, options: RequestInit = {}, token?: string) {
   const headers: Record<string, string> = {

@@ -5,6 +5,7 @@
   "description": "EvalNexa – AI-Powered Digital Examination & On-Screen Marking Platform",
   "scripts": {
     "dev": "concurrently \"pnpm --filter backend dev\" \"pnpm --filter control-center dev\" \"pnpm --filter examiner dev\" \"pnpm --filter moderation dev\"",
+    "dev:frontends": "concurrently \"pnpm --filter control-center dev\" \"pnpm --filter examiner dev\" \"pnpm --filter moderation dev\"",
     "dev:backend": "pnpm --filter backend dev",
     "dev:server": "pnpm --filter backend dev",
     "dev:control-center": "pnpm --filter control-center dev",

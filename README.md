@@ -158,7 +158,8 @@ pnpm dev:moderation      # Moderation → http://localhost:5175
 | Control Center     | http://localhost:5173   | ADMIN     |
 | Examiner Workspace | http://localhost:5174   | EXAMINER  |
 | Moderation Centre  | http://localhost:5175   | MODERATOR |
-| Backend API        | http://localhost:5000   | —         |
+| Backend API (Live) | https://evalnexa.onrender.com | —   |
+| Backend API (Local)| http://localhost:5000   | (Dev)     |
 
 ---
 

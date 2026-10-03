@@ -14,8 +14,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': { target: 'http://localhost:5000', changeOrigin: true },
-      '/socket.io': { target: 'http://localhost:5000', ws: true },
+      '/api': { target: 'https://evalnexa.onrender.com', changeOrigin: true, secure: true },
+      '/socket.io': { target: 'https://evalnexa.onrender.com', ws: true, changeOrigin: true, secure: true },
     },
   },
 });

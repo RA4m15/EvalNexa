@@ -1,11 +1,19 @@
 import axios from 'axios';
-
-const API_BASE = import.meta.env.VITE_API_URL || '/api';
+import { API_BASE_URL } from './config';
 
 export const apiClient = axios.create({
-  baseURL: API_BASE,
+  baseURL: API_BASE_URL,
   withCredentials: true,
   headers: { 'Content-Type': 'application/json' },
+});
+
+// Request interceptor to attach JWT token if available
+apiClient.interceptors.request.use((config) => {
+  const token = localStorage.getItem('evalnexa_token');
+  if (token && config.headers) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
 });
 
 // Response interceptor – let callers handle 401 via react-query
