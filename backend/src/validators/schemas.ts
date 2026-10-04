@@ -47,8 +47,43 @@ export const createAnswerBookSchema = z.object({
   studentCode: z.string().min(2, 'Student code is required'),
   pageCount: z.number().int().positive().default(1),
   scanBatch: z.string().optional(),
+  status: z
+    .enum([
+      'READY',
+      'ASSIGNED',
+      'IN_PROGRESS',
+      'SUBMITTED',
+      'UNDER_REVIEW',
+      'APPROVED',
+      'RETURNED',
+      'FINALIZED',
+    ])
+    .optional(),
+  processingStatus: z
+    .enum([
+      'RECEIVED',
+      'PROCESSING',
+      'QUALITY_REVIEW',
+      'RESCAN_REQUIRED',
+      'OCR_PROCESSING',
+      'FINALIZING',
+      'FINALIZED',
+      'READY_FOR_EVALUATION',
+      'COMPLETED',
+      'ERROR',
+    ])
+    .optional(),
   qualityStatus: z
-    .enum(['READY', 'PROCESSING', 'QUALITY_REVIEW', 'RESCAN_REQUIRED', 'VERIFIED'])
+    .enum([
+      'PENDING',
+      'PASSED',
+      'REVIEW_REQUIRED',
+      'RESCAN_REQUIRED',
+      'VERIFIED',
+      'READY',
+      'PROCESSING',
+      'QUALITY_REVIEW',
+    ])
     .optional(),
   pdfUrl: z.string().optional(),
 });

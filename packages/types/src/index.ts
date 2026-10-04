@@ -51,6 +51,7 @@ export type ProcessingStatus =
   | 'FINALIZING'
   | 'FINALIZED'
   | 'READY_FOR_EVALUATION'
+  | 'COMPLETED'
   | 'ERROR';
 
 // --- Answer Book Status ---
@@ -290,6 +291,26 @@ export interface ExaminerAnalyticsItem {
   averageEvaluationTimeMinutes: number;
 }
 
+// --- Result Status ---
+export type ResultStatus = 'FINALIZED' | 'PUBLISHED' | 'WITHHELD';
+
+// --- Result ---
+export interface Result {
+  _id: string;
+  examId: string | Exam;
+  answerBookId: string | AnswerBook;
+  evaluationId: string | Evaluation;
+  examinerId: string | User;
+  totalMarks: number;
+  maximumMarks: number;
+  percentage: number;
+  status: ResultStatus;
+  finalizedAt: string;
+  finalizedBy: string | User;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // --- Socket.IO Events ---
 export type SocketEvent =
   | 'exam.created'
@@ -308,6 +329,8 @@ export type SocketEvent =
   | 'evaluation.submitted'
   | 'moderation.approved'
   | 'moderation.returned'
+  | 'result.finalized'
+  | 'result.updated'
   | 'user.created';
 
 export interface SocketEventPayload {

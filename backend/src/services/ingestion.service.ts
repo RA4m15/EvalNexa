@@ -1,8 +1,14 @@
 import mongoose from 'mongoose';
-import { AnswerBook, IAnswerBook } from '../models/AnswerBook';
+import {
+  AnswerBook,
+  IAnswerBook,
+  ALLOWED_PROCESSING_TRANSITIONS,
+  validateProcessingStateTransition,
+} from '../models/AnswerBook';
 import { AnswerPage, IAnswerPage } from '../models/AnswerPage';
 import { Exam } from '../models/Exam';
 import { ProcessingStatus, QualityStatus } from '@evalnexa/types';
+import { validateAndFinalizeAnswerBook } from './answerBooks.service';
 import {
   uploadMediaBuffer,
   replaceMediaAsset,
@@ -53,36 +59,10 @@ export interface IngestAnswerBookInput {
   finalize?: boolean;
 }
 
-const ALLOWED_PROCESSING_TRANSITIONS: Record<ProcessingStatus, ProcessingStatus[]> = {
-  RECEIVED: ['PROCESSING', 'ERROR'],
-  PROCESSING: ['QUALITY_REVIEW', 'OCR_PROCESSING', 'RESCAN_REQUIRED', 'ERROR'],
-  QUALITY_REVIEW: ['OCR_PROCESSING', 'RESCAN_REQUIRED', 'FINALIZING', 'FINALIZED', 'ERROR'],
-  OCR_PROCESSING: ['QUALITY_REVIEW', 'FINALIZING', 'FINALIZED', 'ERROR'],
-  RESCAN_REQUIRED: ['PROCESSING', 'RECEIVED', 'ERROR'],
-  FINALIZING: ['FINALIZED', 'READY_FOR_EVALUATION', 'ERROR', 'QUALITY_REVIEW'],
-  FINALIZED: ['READY_FOR_EVALUATION', 'FINALIZING'],
-  READY_FOR_EVALUATION: [],
-  ERROR: ['RECEIVED', 'PROCESSING'],
+export {
+  ALLOWED_PROCESSING_TRANSITIONS,
+  validateProcessingStateTransition,
 };
-
-/**
- * Validates processing state transitions
- */
-export function validateProcessingStateTransition(
-  current: ProcessingStatus,
-  next: ProcessingStatus
-): void {
-  if (current === next) return;
-  const allowed = ALLOWED_PROCESSING_TRANSITIONS[current] || [];
-  if (!allowed.includes(next)) {
-    const error: any = new Error(
-      `Invalid processing state transition from '${current}' to '${next}'. Allowed: ${allowed.join(', ') || 'None'}`
-    );
-    error.status = 400;
-    error.code = 'INVALID_PROCESSING_TRANSITION';
-    throw error;
-  }
-}
 
 /**
  * Idempotently ingests or updates an AnswerBook and its scanned pages.
@@ -127,8 +107,26 @@ export async function ingestAnswerBookData(
     // Update metadata if provided
     if (input.pageCount) answerBook.pageCount = input.pageCount;
     if (input.scanBatch) answerBook.scanBatch = input.scanBatch;
-    if (input.processingStatus) {
+    if (input.processingStatus && input.processingStatus !== answerBook.processingStatus) {
+      const previousStatus = answerBook.processingStatus;
+      validateProcessingStateTransition(previousStatus, input.processingStatus);
       answerBook.processingStatus = input.processingStatus;
+
+      await logAuditAction({
+        actorName: 'Scanning Service',
+        actorRole: 'SCANNING_SERVICE',
+        action: 'PROCESSING_STATUS_UPDATED',
+        entityType: 'AnswerBook',
+        entityId: answerBook._id.toString(),
+        metadata: {
+          previousStatus,
+          newStatus: input.processingStatus,
+          qualityStatus: input.qualityStatus || answerBook.qualityStatus,
+          answerBookCode: answerBook.answerBookCode,
+          examId: exam._id.toString(),
+          timestamp: new Date().toISOString(),
+        },
+      });
     }
     if (input.qualityStatus) {
       answerBook.qualityStatus = input.qualityStatus;
@@ -221,7 +219,7 @@ export async function ingestAnswerBookData(
           cloudinary: cloudinaryData,
           ...(pageMeta?.ocr ? { ocr: pageMeta.ocr } : {}),
           ...(pageMeta?.quality ? { quality: pageMeta.quality } : {}),
-          ...(pageMeta?.processingStatus ? { processingStatus: pageMeta.processingStatus } : {}),
+          processingStatus: pageMeta?.processingStatus || 'COMPLETED',
           finalized: pageMeta?.processingStatus === 'FINALIZED' || Boolean(input.finalize),
         },
       },
@@ -293,74 +291,10 @@ export async function ingestAnswerBookData(
  * Validates and finalizes an answer book when scanning and quality requirements are satisfied
  */
 export async function attemptFinalization(answerBook: IAnswerBook): Promise<IAnswerBook> {
-  const pages = await AnswerPage.find({ answerBookId: answerBook._id }).sort({ pageNumber: 1 });
-
-  if (pages.length === 0) {
-    const error: any = new Error('Cannot finalize script: No answer pages exist');
-    error.status = 400;
-    error.code = 'NO_PAGES';
-    throw error;
-  }
-
-  // Validate sequential page ordering (1, 2, ..., N)
-  for (let i = 0; i < pages.length; i++) {
-    if (pages[i].pageNumber !== i + 1) {
-      const error: any = new Error(
-        `Cannot finalize script: Page sequence broken. Expected page ${i + 1}, found ${pages[i].pageNumber}`
-      );
-      error.status = 400;
-      error.code = 'INVALID_PAGE_SEQUENCE';
-      throw error;
-    }
-  }
-
-  // Validate quality status
-  const hasRescan = pages.some((p) => p.quality?.status === 'RESCAN_REQUIRED');
-  if (hasRescan || answerBook.qualityStatus === 'RESCAN_REQUIRED') {
-    const error: any = new Error('Cannot finalize script: One or more pages require rescan');
-    error.status = 400;
-    error.code = 'RESCAN_REQUIRED';
-    throw error;
-  }
-
-  // Mark all pages finalized
-  await AnswerPage.updateMany(
-    { answerBookId: answerBook._id },
-    { $set: { finalized: true, processingStatus: 'FINALIZED' } }
-  );
-
-  answerBook.processingStatus = 'READY_FOR_EVALUATION';
-  answerBook.status = 'READY';
-  await answerBook.save();
-
-  await logAuditAction({
-    actorName: 'Scanning Service',
-    actorRole: 'SCANNING_SERVICE',
-    action: 'SCRIPT_FINALIZED',
-    entityType: 'AnswerBook',
-    entityId: answerBook._id.toString(),
-    metadata: {
-      answerBookCode: answerBook.answerBookCode,
-      pageCount: pages.length,
-    },
+  return validateAndFinalizeAnswerBook(answerBook._id.toString(), {
+    name: 'Scanning Service',
+    role: 'SCANNING_SERVICE',
   });
-
-  await logAuditAction({
-    actorName: 'Scanning Service',
-    actorRole: 'SCANNING_SERVICE',
-    action: 'SCRIPT_READY_FOR_EVALUATION',
-    entityType: 'AnswerBook',
-    entityId: answerBook._id.toString(),
-    metadata: {
-      answerBookCode: answerBook.answerBookCode,
-      pageCount: pages.length,
-    },
-  });
-
-  emitToAll('script.finalized', { answerBook });
-  emitToAll('answerbook.status.changed', { answerBook });
-
-  return answerBook;
 }
 
 /**
@@ -369,7 +303,8 @@ export async function attemptFinalization(answerBook: IAnswerBook): Promise<IAns
 export async function updateScriptProcessingStatus(
   answerBookId: string,
   newStatus: ProcessingStatus,
-  qualityStatus?: QualityStatus
+  qualityStatus?: QualityStatus,
+  actor?: { id?: string; name?: string; role?: string }
 ): Promise<IAnswerBook> {
   const answerBook = await AnswerBook.findById(answerBookId);
   if (!answerBook) {
@@ -379,8 +314,11 @@ export async function updateScriptProcessingStatus(
     throw error;
   }
 
-  // Validate state transition
-  validateProcessingStateTransition(answerBook.processingStatus, newStatus);
+  // Capture previous status BEFORE the new status is assigned
+  const previousStatus = answerBook.processingStatus;
+
+  // Validate state transition through authoritative validator
+  validateProcessingStateTransition(previousStatus, newStatus);
 
   answerBook.processingStatus = newStatus;
   if (qualityStatus) {
@@ -394,15 +332,19 @@ export async function updateScriptProcessingStatus(
   }
 
   await logAuditAction({
-    actorName: 'Scanning Service',
-    actorRole: 'SCANNING_SERVICE',
+    actorId: actor?.id,
+    actorName: actor?.name || 'Scanning Service',
+    actorRole: actor?.role || 'SCANNING_SERVICE',
     action: 'PROCESSING_STATUS_UPDATED',
     entityType: 'AnswerBook',
     entityId: answerBook._id.toString(),
     metadata: {
-      previousStatus: answerBook.processingStatus,
+      previousStatus,
       newStatus,
-      qualityStatus,
+      qualityStatus: qualityStatus || answerBook.qualityStatus,
+      answerBookCode: answerBook.answerBookCode,
+      examId: answerBook.examId?.toString(),
+      timestamp: new Date().toISOString(),
     },
   });
 

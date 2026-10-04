@@ -21,6 +21,11 @@ interface CapturedPageItem {
   processedImageUrl?: string;
 }
 
+interface PageUploadTracking {
+  status: 'PENDING' | 'UPLOADING' | 'SUCCESS' | 'FAILED';
+  error?: string;
+}
+
 export function ScanCenterPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -31,7 +36,7 @@ export function ScanCenterPage() {
   const [selectedExamId, setSelectedExamId] = useState<string>('');
   const [answerBookCode, setAnswerBookCode] = useState<string>('');
   const [studentCode, setStudentCode] = useState<string>('');
-  const [expectedPageCount, setExpectedPageCount] = useState<string>('8');
+  const [expectedPageCount, setExpectedPageCount] = useState<string>('');
 
   // Camera & Capture state
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -53,6 +58,9 @@ export function ScanCenterPage() {
 
   // Accepted pages list
   const [acceptedPages, setAcceptedPages] = useState<CapturedPageItem[]>([]);
+  const [pageUploadStates, setPageUploadStates] = useState<Record<number, PageUploadTracking>>({});
+  const [isFinalizing, setIsFinalizing] = useState<boolean>(false);
+  const [registeredBookId, setRegisteredBookId] = useState<string | null>(null);
   const [finalizeError, setFinalizeError] = useState<string>('');
   const [finalizedSuccessBook, setFinalizedSuccessBook] = useState<AnswerBook | null>(null);
 
@@ -81,6 +89,40 @@ export function ScanCenterPage() {
     refetchInterval: 12000,
   });
 
+  // Computed expected page count and validation
+  const parsedExpectedPageCount = parseInt(expectedPageCount, 10);
+  const isExpectedPageCountValid =
+    Number.isInteger(parsedExpectedPageCount) &&
+    parsedExpectedPageCount > 0 &&
+    expectedPageCount.trim() === parsedExpectedPageCount.toString();
+
+  const remainingPages = isExpectedPageCountValid
+    ? Math.max(0, parsedExpectedPageCount - acceptedPages.length)
+    : null;
+
+  // Auto-detect metadata from existing answer-book register
+  const handleAnswerBookCodeChange = (value: string) => {
+    setAnswerBookCode(value);
+    const clean = value.trim().toUpperCase();
+    if (clean) {
+      const match = answerBooks.find(
+        (ab) => ab.answerBookCode.toUpperCase() === clean
+      );
+      if (match) {
+        if (match.pageCount && (!expectedPageCount || expectedPageCount === '')) {
+          setExpectedPageCount(match.pageCount.toString());
+        }
+        if (match.studentCode && !studentCode) {
+          setStudentCode(match.studentCode);
+        }
+        const examIdStr = typeof match.examId === 'string' ? match.examId : match.examId?._id;
+        if (examIdStr && !selectedExamId) {
+          setSelectedExamId(examIdStr);
+        }
+      }
+    }
+  };
+
   // Check OpenCV service health on mount
   useEffect(() => {
     checkScanningServiceHealth().then((res) => {
@@ -88,7 +130,7 @@ export function ScanCenterPage() {
     });
   }, []);
 
-  // Pre-fill exam if provided in query
+  // Pre-fill from query params or defaults
   useEffect(() => {
     const examParam = searchParams.get('examId');
     if (examParam && !selectedExamId) {
@@ -96,7 +138,39 @@ export function ScanCenterPage() {
     } else if (exams.length > 0 && !selectedExamId) {
       setSelectedExamId(exams[0]._id);
     }
-  }, [searchParams, exams, selectedExamId]);
+
+    const codeParam = searchParams.get('answerBookCode') || searchParams.get('code') || searchParams.get('bookCode');
+    if (codeParam && !answerBookCode) {
+      setAnswerBookCode(codeParam);
+    }
+
+    const studentParam = searchParams.get('studentCode');
+    if (studentParam && !studentCode) {
+      setStudentCode(studentParam);
+    }
+
+    const pageCountParam = searchParams.get('pageCount') || searchParams.get('expectedPages');
+    if (pageCountParam && !expectedPageCount) {
+      const parsed = parseInt(pageCountParam, 10);
+      if (Number.isInteger(parsed) && parsed > 0) {
+        setExpectedPageCount(parsed.toString());
+      }
+    }
+  }, [searchParams, exams, selectedExamId, expectedPageCount, answerBookCode, studentCode]);
+
+  // When answer-book code matches an existing record in the database, obtain its page count metadata
+  useEffect(() => {
+    if (answerBookCode && (!expectedPageCount || expectedPageCount === '') && answerBooks.length > 0) {
+      const clean = answerBookCode.trim().toUpperCase();
+      const matched = answerBooks.find((ab) => ab.answerBookCode.toUpperCase() === clean);
+      if (matched?.pageCount) {
+        setExpectedPageCount(matched.pageCount.toString());
+      }
+      if (matched?.studentCode && !studentCode) {
+        setStudentCode(matched.studentCode);
+      }
+    }
+  }, [answerBookCode, answerBooks, expectedPageCount, studentCode]);
 
   // Clean up camera on unmount
   useEffect(() => {
@@ -299,23 +373,26 @@ export function ScanCenterPage() {
       return;
     }
 
-    setAcceptedPages((prev) => [
+    const acceptedPageItem: CapturedPageItem = {
+      pageNumber: currentPendingPage.pageNumber,
+      previewUrl: currentPendingPage.previewUrl,
+      blob: currentPendingPage.blob,
+      qualityStatus: currentPendingPage.qualityStatus,
+      diagnostics: currentPendingPage.diagnostics,
+      processedImageUrl: currentPendingPage.processedImageUrl,
+    };
+
+    setAcceptedPages((prev) => [...prev, acceptedPageItem]);
+    setPageUploadStates((prev) => ({
       ...prev,
-      {
-        pageNumber: currentPendingPage.pageNumber,
-        previewUrl: currentPendingPage.previewUrl,
-        blob: currentPendingPage.blob,
-        qualityStatus: currentPendingPage.qualityStatus,
-        diagnostics: currentPendingPage.diagnostics,
-        processedImageUrl: currentPendingPage.processedImageUrl,
-      },
-    ]);
+      [currentPendingPage.pageNumber]: { status: 'PENDING' },
+    }));
 
     setCurrentPendingPage(null);
 
     // If reached expected page count, prompt to finalize, else return to capture
-    const totalExpected = parseInt(expectedPageCount, 10) || 1;
-    if (acceptedPages.length + 1 >= totalExpected) {
+    const totalExpected = isExpectedPageCountValid ? parsedExpectedPageCount : 0;
+    if (totalExpected > 0 && acceptedPages.length + 1 >= totalExpected) {
       setStep(4); // Proceed to Finalize
     } else {
       setStep(2); // Continue capturing next page
@@ -330,66 +407,150 @@ export function ScanCenterPage() {
     setStep(2); // Return to camera capture
   };
 
-  // Finalize Answer Book Mutation (Section 12)
-  const finalizeMutation = useMutation({
-    mutationFn: async () => {
+  // Upload single page with status tracking
+  const uploadSinglePage = async (bookId: string, pg: CapturedPageItem): Promise<boolean> => {
+    setPageUploadStates((prev) => ({
+      ...prev,
+      [pg.pageNumber]: { status: 'UPLOADING' },
+    }));
+
+    try {
+      const formData = new FormData();
+      formData.append('file', pg.blob, `page_${pg.pageNumber}.jpg`);
+      formData.append('pageNumber', String(pg.pageNumber));
+      if (pg.diagnostics?.status) formData.append('qualityStatus', pg.diagnostics.status);
+      if (pg.diagnostics?.sharpnessScore) {
+        formData.append('qualityScore', String(pg.diagnostics.sharpnessScore));
+      }
+
+      await apiClient.post(`/answer-books/${bookId}/pages`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+
+      setPageUploadStates((prev) => ({
+        ...prev,
+        [pg.pageNumber]: { status: 'SUCCESS' },
+      }));
+      return true;
+    } catch (err: any) {
+      const errMsg = err.response?.data?.message || err.message || `Page ${pg.pageNumber} upload failed`;
+      setPageUploadStates((prev) => ({
+        ...prev,
+        [pg.pageNumber]: { status: 'FAILED', error: errMsg },
+      }));
+      return false;
+    }
+  };
+
+  // Finalize Answer Book Workflow: strict page uploads and backend validation
+  const handleFinalizeWorkflow = async (pagesToUpload?: CapturedPageItem[]) => {
+    setFinalizeError('');
+    setIsFinalizing(true);
+
+    try {
       if (!selectedExamId) throw new Error('Please select an examination');
       if (!answerBookCode.trim()) throw new Error('Please specify an Answer Book Code');
       if (!studentCode.trim()) throw new Error('Please specify a Student Identifier');
       if (acceptedPages.length === 0) throw new Error('Cannot finalize script with 0 accepted pages');
 
-      // 1. Create or register AnswerBook in MongoDB via backend API
-      const payload = {
-        examId: selectedExamId,
-        answerBookCode: answerBookCode.trim().toUpperCase(),
-        studentCode: studentCode.trim().toUpperCase(),
-        pageCount: acceptedPages.length,
-        scanBatch: `BATCH-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-01`,
-        status: 'READY',
-        qualityStatus: 'VERIFIED',
-        processingStatus: 'READY_FOR_EVALUATION',
-      };
+      if (!isExpectedPageCountValid) {
+        throw new Error('Expected page count is not specified or invalid. Please enter a valid positive integer in Step 1.');
+      }
 
-      const { data } = await apiClient.post('/answer-books', payload);
-      const savedBook = data.data as AnswerBook;
+      if (acceptedPages.length !== parsedExpectedPageCount) {
+        throw new Error(
+          `Cannot finalize script: Page count mismatch. Expected ${parsedExpectedPageCount} page(s), but captured ${acceptedPages.length} page(s). (${Math.abs(parsedExpectedPageCount - acceptedPages.length)} page(s) ${acceptedPages.length < parsedExpectedPageCount ? 'remaining' : 'extra'}). All expected pages must be captured and verified before finalization.`
+        );
+      }
 
-      // 2. Upload physical page media to Cloudinary via backend endpoint
-      for (const pg of acceptedPages) {
-        try {
-          const formData = new FormData();
-          formData.append('file', pg.blob, `page_${pg.pageNumber}.jpg`);
-          formData.append('pageNumber', String(pg.pageNumber));
-          if (pg.diagnostics?.status) formData.append('qualityStatus', pg.diagnostics.status);
-          if (pg.diagnostics?.sharpnessScore) formData.append('qualityScore', String(pg.diagnostics.sharpnessScore));
-          await apiClient.post(`/answer-books/${savedBook._id}/pages`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' },
-          });
-        } catch (pageErr) {
-          console.warn(`Page ${pg.pageNumber} upload notice:`, pageErr);
+      // Check if any accepted page is marked RESCAN_REQUIRED
+      const invalidQualityPage = acceptedPages.find((p) => p.qualityStatus === 'RESCAN_REQUIRED');
+      if (invalidQualityPage) {
+        throw new Error(
+          `Page 0${invalidQualityPage.pageNumber} is flagged as RESCAN_REQUIRED. It must be recaptured and verified before finalization.`
+        );
+      }
+
+      // 1. Create or register draft AnswerBook in MongoDB via backend API
+      let bookId = registeredBookId;
+      if (!bookId) {
+        const payload = {
+          examId: selectedExamId,
+          answerBookCode: answerBookCode.trim().toUpperCase(),
+          studentCode: studentCode.trim().toUpperCase(),
+          pageCount: parsedExpectedPageCount,
+          scanBatch: `BATCH-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-01`,
+          status: 'READY',
+          qualityStatus: 'PASSED',
+          processingStatus: 'PROCESSING',
+        };
+
+        const { data } = await apiClient.post('/answer-books', payload);
+        const savedBook = data.data as AnswerBook;
+        bookId = savedBook._id;
+        setRegisteredBookId(bookId);
+      }
+
+      // 2. Upload pages
+      const targetPages = pagesToUpload || acceptedPages;
+      const pagesToProcess = targetPages.filter(
+        (pg) => pageUploadStates[pg.pageNumber]?.status !== 'SUCCESS'
+      );
+
+      let anyFailed = false;
+      const failedPageNumbers: number[] = [];
+
+      for (const pg of pagesToProcess) {
+        const success = await uploadSinglePage(bookId, pg);
+        if (!success) {
+          anyFailed = true;
+          failedPageNumbers.push(pg.pageNumber);
         }
       }
 
-      return savedBook;
-    },
-    onSuccess: (savedBook) => {
+      // Verify that every page in acceptedPages has reached SUCCESS
+      const unverifiedPages = acceptedPages.filter((pg) => {
+        if (failedPageNumbers.includes(pg.pageNumber)) return true;
+        const st = pageUploadStates[pg.pageNumber]?.status;
+        return st !== 'SUCCESS' && !pagesToProcess.some((p) => p.pageNumber === pg.pageNumber);
+      });
+
+      if (anyFailed || unverifiedPages.length > 0) {
+        const allFailed = Array.from(
+          new Set([...failedPageNumbers, ...unverifiedPages.map((p) => p.pageNumber)])
+        ).sort((a, b) => a - b);
+        throw new Error(
+          `Upload failed for: ${allFailed.map((n) => `Page 0${n}`).join(', ')}. All pages must be uploaded successfully before finalization. Please retry failed pages.`
+        );
+      }
+
+      // 3. Strict Backend Finalization Call
+      const finalizeRes = await apiClient.post(`/answer-books/${bookId}/finalize`);
+      const finalizedBook = finalizeRes.data.data as AnswerBook;
+
+      // 4. Successful finalization
       queryClient.invalidateQueries({ queryKey: ['scan-center-books'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-answer-books'] });
       queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
-      setFinalizedSuccessBook(savedBook);
+      setFinalizedSuccessBook(finalizedBook);
       stopCamera();
-    },
-    onError: (err: any) => {
+    } catch (err: any) {
       const msg = err.response?.data?.message || err.message || 'Finalization failed';
       setFinalizeError(msg);
-    },
-  });
+    } finally {
+      setIsFinalizing(false);
+    }
+  };
 
   const resetForNextScript = () => {
     setFinalizedSuccessBook(null);
     setAcceptedPages([]);
     setCurrentPendingPage(null);
+    setPageUploadStates({});
+    setRegisteredBookId(null);
     setAnswerBookCode('');
     setStudentCode('');
+    setExpectedPageCount('');
     setFinalizeError('');
     setStep(1);
   };
@@ -440,7 +601,9 @@ export function ScanCenterPage() {
           <div className="process-step__content">
             <div className="process-step__title">CAMERA CAPTURE</div>
             <div className="process-step__desc">
-              {acceptedPages.length} of {expectedPageCount} pages captured
+              {isExpectedPageCountValid
+                ? `${acceptedPages.length} of ${parsedExpectedPageCount} captured (${remainingPages} remaining)`
+                : `${acceptedPages.length} pages captured`}
             </div>
           </div>
         </div>
@@ -546,7 +709,7 @@ export function ScanCenterPage() {
                   className="form-input"
                   placeholder="e.g. AB-LAW-3922"
                   value={answerBookCode}
-                  onChange={(e) => setAnswerBookCode(e.target.value)}
+                  onChange={(e) => handleAnswerBookCodeChange(e.target.value)}
                   style={{ fontSize: 'var(--text-body)', padding: '10px 14px' }}
                 />
                 <div className="form-hint">Physical barcode/stamp code</div>
@@ -567,16 +730,33 @@ export function ScanCenterPage() {
               </div>
 
               <div className="form-field">
-                <label className="form-label">Expected Pages</label>
+                <label className="form-label">
+                  Expected Pages <span className="required">*</span>
+                </label>
                 <input
                   type="number"
                   min="1"
-                  max="64"
+                  max="128"
                   className="form-input"
+                  placeholder="e.g. 12"
                   value={expectedPageCount}
                   onChange={(e) => setExpectedPageCount(e.target.value)}
-                  style={{ fontSize: 'var(--text-body)', padding: '10px 14px' }}
+                  style={{
+                    fontSize: 'var(--text-body)',
+                    padding: '10px 14px',
+                    borderColor:
+                      expectedPageCount !== '' && !isExpectedPageCountValid
+                        ? 'var(--crimson)'
+                        : undefined,
+                  }}
                 />
+                {expectedPageCount !== '' && !isExpectedPageCountValid ? (
+                  <div className="form-hint" style={{ color: 'var(--status-returned-text)' }}>
+                    Must be a positive integer (e.g. 4, 8, 12, 16)
+                  </div>
+                ) : (
+                  <div className="form-hint">Physical pages to verify</div>
+                )}
               </div>
             </div>
 
@@ -584,7 +764,12 @@ export function ScanCenterPage() {
               <button
                 className="btn btn-primary"
                 style={{ padding: '10px 24px', fontSize: 'var(--text-body)' }}
-                disabled={!selectedExamId || !answerBookCode.trim() || !studentCode.trim()}
+                disabled={
+                  !selectedExamId ||
+                  !answerBookCode.trim() ||
+                  !studentCode.trim() ||
+                  !isExpectedPageCountValid
+                }
                 onClick={() => {
                   setStep(2);
                   startCamera();
@@ -606,7 +791,8 @@ export function ScanCenterPage() {
               <div>
                 <span className="folio-card__title">Live Camera Preview</span>
                 <div className="label-mono" style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>
-                  Capturing Page 0{acceptedPages.length + 1} of {expectedPageCount}
+                  Capturing Page 0{acceptedPages.length + 1} of {isExpectedPageCountValid ? parsedExpectedPageCount : '—'}
+                  {remainingPages !== null && ` · ${remainingPages} remaining`}
                 </div>
               </div>
               <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
@@ -719,7 +905,7 @@ export function ScanCenterPage() {
                         ALIGN PHYSICAL SCRIPT WITHIN RECTANGLE
                       </div>
                       <div style={{ padding: 8, color: '#FFFFFF', fontSize: '11px', background: 'rgba(0,0,0,0.6)', width: 'fit-content', alignSelf: 'flex-end' }}>
-                        PAGE 0{acceptedPages.length + 1}
+                        PAGE 0{acceptedPages.length + 1}{isExpectedPageCountValid ? ` OF ${parsedExpectedPageCount}` : ''}
                       </div>
                     </div>
                   )}
@@ -758,7 +944,7 @@ export function ScanCenterPage() {
               <div>
                 <span className="folio-card__title">Captured Pages ({acceptedPages.length})</span>
                 <div className="label-mono" style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>
-                  Target: {expectedPageCount} pages
+                  Expected: {isExpectedPageCountValid ? parsedExpectedPageCount : '—'} · Remaining: {remainingPages !== null ? remainingPages : '—'}
                 </div>
               </div>
               {acceptedPages.length > 0 && (
@@ -773,6 +959,17 @@ export function ScanCenterPage() {
                 <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: 2 }}>Answer Book Code</div>
                 <div style={{ fontWeight: 700, fontSize: 'var(--text-body)' }}>{answerBookCode}</div>
                 <div style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-secondary)' }}>Student: {studentCode}</div>
+                <div style={{ marginTop: 6, display: 'flex', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+                  <span className="status-badge" style={{ background: 'var(--parchment-panel)', border: '1px solid var(--parchment-border)' }}>
+                    Expected: {isExpectedPageCountValid ? parsedExpectedPageCount : '—'}
+                  </span>
+                  <span className="status-badge status-badge--review">
+                    Captured: {acceptedPages.length}
+                  </span>
+                  <span className={`status-badge ${remainingPages === 0 ? 'status-badge--approved' : 'status-badge--returned'}`}>
+                    Remaining: {remainingPages !== null ? remainingPages : '—'}
+                  </span>
+                </div>
               </div>
 
               {acceptedPages.length === 0 ? (
@@ -945,76 +1142,181 @@ export function ScanCenterPage() {
 
       {/* STEP 4: FINALIZE ANSWER BOOK (Section 12) */}
       {step === 4 && !finalizedSuccessBook && (
-        <div className="folio-card" style={{ maxWidth: 760, margin: '0 auto var(--space-8)' }}>
+        <div className="folio-card" style={{ maxWidth: 860, margin: '0 auto var(--space-8)' }}>
           <div className="folio-card__header">
             <span className="folio-card__title">Step 4: Answer Book Summary & Finalization</span>
           </div>
 
           <div className="folio-card__body">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-4)', marginBottom: 'var(--space-6)', padding: 'var(--space-4)', background: 'var(--parchment-panel)', border: '1px solid var(--parchment-border)', borderRadius: 'var(--radius-sm)' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--space-3)', marginBottom: 'var(--space-6)', padding: 'var(--space-4)', background: 'var(--parchment-panel)', border: '1px solid var(--parchment-border)', borderRadius: 'var(--radius-sm)' }}>
               <div>
                 <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Answer Book Code</div>
-                <div style={{ fontSize: '20px', fontWeight: 700, color: 'var(--text-primary)' }}>{answerBookCode}</div>
-              </div>
-
-              <div>
-                <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Student Identifier</div>
-                <div style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-secondary)' }}>{studentCode}</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: 'var(--text-primary)' }}>{answerBookCode}</div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Student: {studentCode}</div>
               </div>
 
               <div>
                 <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Target Examination</div>
-                <div style={{ fontSize: 'var(--text-body)', fontWeight: 600 }}>{selectedExam?.title || selectedExamId}</div>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>{selectedExam?.title || selectedExamId}</div>
               </div>
 
               <div>
-                <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Pages Verified</div>
-                <div style={{ fontSize: 'var(--text-body)', fontWeight: 700, color: 'var(--status-approved-text)' }}>
-                  {acceptedPages.length} of {expectedPageCount} pages accepted
+                <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Captured vs Expected</div>
+                <div style={{ fontSize: '16px', fontWeight: 700, color: isExpectedPageCountValid && acceptedPages.length === parsedExpectedPageCount ? 'var(--status-approved-text)' : 'var(--crimson)' }}>
+                  {acceptedPages.length} / {isExpectedPageCountValid ? parsedExpectedPageCount : '—'} Pages
+                </div>
+              </div>
+
+              <div>
+                <div className="label-caps" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Remaining Pages</div>
+                <div style={{ fontSize: '16px', fontWeight: 700, color: remainingPages === 0 ? 'var(--status-approved-text)' : 'var(--status-returned-text)' }}>
+                  {isExpectedPageCountValid && remainingPages !== null ? (remainingPages === 0 ? '✓ Complete' : `${remainingPages} Pending`) : '—'}
                 </div>
               </div>
             </div>
 
-            {/* Thumbnail review strip */}
-            <div className="label-caps" style={{ marginBottom: 'var(--space-2)' }}>Accepted Pages Dossier</div>
-            <div style={{ display: 'flex', gap: 'var(--space-3)', overflowX: 'auto', paddingBottom: 'var(--space-3)', marginBottom: 'var(--space-6)' }}>
-              {acceptedPages.map((pg, idx) => (
-                <div key={idx} style={{ textAlign: 'center', flexShrink: 0 }}>
-                  <img
-                    src={pg.previewUrl}
-                    alt={`Page ${pg.pageNumber}`}
-                    style={{ width: 84, height: 110, objectFit: 'cover', borderRadius: 2, border: '1px solid var(--rule)' }}
-                  />
-                  <div className="label-mono" style={{ fontSize: '11px', marginTop: 4 }}>
-                    PG 0{pg.pageNumber}
+            {/* Per-page upload tracking and retry dossier */}
+            <div className="label-caps" style={{ marginBottom: 'var(--space-3)' }}>
+              Digital Pages Upload & Verification Status
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', marginBottom: 'var(--space-6)' }}>
+              {acceptedPages.map((pg) => {
+                const pageState = pageUploadStates[pg.pageNumber]?.status || 'PENDING';
+                const pageError = pageUploadStates[pg.pageNumber]?.error;
+
+                return (
+                  <div
+                    key={pg.pageNumber}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '10px 14px',
+                      background: 'var(--parchment-panel)',
+                      border: `1px solid ${pageState === 'FAILED' ? 'rgba(180, 35, 24, 0.4)' : 'var(--parchment-border)'}`,
+                      borderRadius: 'var(--radius-sm)',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+                      <img
+                        src={pg.previewUrl}
+                        alt={`Page ${pg.pageNumber}`}
+                        style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 2, border: '1px solid var(--rule)' }}
+                      />
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 'var(--text-body)' }}>PAGE 0{pg.pageNumber}</div>
+                        {pageState === 'SUCCESS' && (
+                          <div className="label-mono" style={{ fontSize: '11px', color: 'var(--status-approved-text)' }}>
+                            ✓ Cloudinary Media Verified
+                          </div>
+                        )}
+                        {pageState === 'UPLOADING' && (
+                          <div className="label-mono" style={{ fontSize: '11px', color: 'var(--status-review-text)' }}>
+                            Uploading media asset…
+                          </div>
+                        )}
+                        {pageState === 'FAILED' && (
+                          <div className="label-mono" style={{ fontSize: '11px', color: 'var(--status-returned-text)' }}>
+                            Upload Failed: {pageError || 'Network/Server Error'}
+                          </div>
+                        )}
+                        {pageState === 'PENDING' && (
+                          <div className="label-mono" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                            Awaiting upload during finalization
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      {pageState === 'SUCCESS' && (
+                        <span className="status-badge status-badge--approved">VERIFIED</span>
+                      )}
+                      {pageState === 'UPLOADING' && (
+                        <span className="status-badge status-badge--review">UPLOADING</span>
+                      )}
+                      {pageState === 'FAILED' && (
+                        <>
+                          <span className="status-badge status-badge--returned">FAILED</span>
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            disabled={isFinalizing}
+                            onClick={() => handleFinalizeWorkflow([pg])}
+                          >
+                            Retry Page
+                          </button>
+                        </>
+                      )}
+                      {pageState === 'PENDING' && (
+                        <span className="status-badge" style={{ background: 'var(--parchment-border)', color: 'var(--text-muted)' }}>
+                          PENDING
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {(!isExpectedPageCountValid || acceptedPages.length !== parsedExpectedPageCount) && (
+              <div className="attention-item attention-item--critical" style={{ marginBottom: 'var(--space-4)' }}>
+                <div className="attention-item__icon">⚠</div>
+                <div className="attention-item__content">
+                  <div className="attention-item__title">Finalization Blocked: Page Count Mismatch</div>
+                  <div className="attention-item__desc">
+                    {!isExpectedPageCountValid
+                      ? 'The expected page count is missing or invalid. Please return to Step 1 and specify a valid positive integer.'
+                      : acceptedPages.length < parsedExpectedPageCount
+                      ? `Physical answer book expects ${parsedExpectedPageCount} page(s), but only ${acceptedPages.length} page(s) have been captured (${remainingPages} remaining). Please capture all remaining pages before finalization.`
+                      : `Physical answer book expects ${parsedExpectedPageCount} page(s), but ${acceptedPages.length} page(s) were captured (${acceptedPages.length - parsedExpectedPageCount} excess page(s)). Captured pages must equal expected pages.`}
                   </div>
                 </div>
-              ))}
-            </div>
+              </div>
+            )}
 
             {finalizeError && (
               <div className="attention-item attention-item--critical" style={{ marginBottom: 'var(--space-4)' }}>
                 <div className="attention-item__icon">⚠</div>
                 <div className="attention-item__content">
-                  <div className="attention-item__title">Finalization Failed</div>
+                  <div className="attention-item__title">Finalization Blocked</div>
                   <div className="attention-item__desc">{finalizeError}</div>
                 </div>
               </div>
             )}
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 'var(--space-4)' }}>
-              <button className="btn btn-secondary" onClick={() => setStep(2)}>
+              <button className="btn btn-secondary" onClick={() => setStep(2)} disabled={isFinalizing}>
                 ← Capture More Pages
               </button>
 
-              <button
-                className="btn btn-primary"
-                style={{ padding: '12px 28px', fontSize: 'var(--text-body)' }}
-                disabled={finalizeMutation.isPending || acceptedPages.length === 0}
-                onClick={() => finalizeMutation.mutate()}
-              >
-                {finalizeMutation.isPending ? 'Finalizing Digital Script…' : 'FINALIZE DIGITAL SCRIPT →'}
-              </button>
+              <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
+                {acceptedPages.some((pg) => pageUploadStates[pg.pageNumber]?.status === 'FAILED') && (
+                  <button
+                    className="btn btn-secondary"
+                    style={{ padding: '12px 20px', fontSize: 'var(--text-body)' }}
+                    disabled={isFinalizing}
+                    onClick={() => handleFinalizeWorkflow()}
+                  >
+                    ↺ Retry Failed Pages
+                  </button>
+                )}
+
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '12px 28px', fontSize: 'var(--text-body)' }}
+                  disabled={
+                    isFinalizing ||
+                    acceptedPages.length === 0 ||
+                    !isExpectedPageCountValid ||
+                    acceptedPages.length !== parsedExpectedPageCount
+                  }
+                  onClick={() => handleFinalizeWorkflow()}
+                >
+                  {isFinalizing ? 'Finalizing Digital Script…' : 'FINALIZE DIGITAL SCRIPT →'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

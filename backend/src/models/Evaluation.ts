@@ -66,4 +66,14 @@ const EvaluationSchema = new Schema<IEvaluation>(
   { timestamps: true }
 );
 
+// Authoritative totalMarks calculation: always recalculate from questionMarks
+EvaluationSchema.pre('validate', function (next) {
+  if (this.questionMarks && Array.isArray(this.questionMarks)) {
+    this.totalMarks = this.questionMarks
+      .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
+      .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
+  }
+  next();
+});
+
 export const Evaluation = mongoose.model<IEvaluation>('Evaluation', EvaluationSchema);

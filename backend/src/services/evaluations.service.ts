@@ -1,9 +1,195 @@
+import mongoose from 'mongoose';
 import { Evaluation, IEvaluation, IEvaluationQuestionMark } from '../models/Evaluation';
 import { AnswerBook } from '../models/AnswerBook';
 import { Question } from '../models/Question';
+import { Exam } from '../models/Exam';
 import { validateStateTransition } from './answerBooks.service';
 import { logAuditAction } from './audit.service';
 import { emitToAll, emitToRole } from '../sockets';
+
+export interface IAuthoritativeQuestion {
+  questionNumber: number;
+  maximumMarks: number;
+  text?: string;
+}
+
+/**
+ * Fetches official exam questions from MongoDB.
+ * Falls back to Exam metadata if individual Question records are not populated.
+ */
+export async function fetchAuthoritativeQuestions(
+  examId: string | mongoose.Types.ObjectId
+): Promise<Map<number, IAuthoritativeQuestion>> {
+  const officialQuestions = await Question.find({ examId }).sort({ questionNumber: 1 });
+  const questionMap = new Map<number, IAuthoritativeQuestion>();
+
+  if (officialQuestions.length > 0) {
+    for (const q of officialQuestions) {
+      questionMap.set(q.questionNumber, {
+        questionNumber: q.questionNumber,
+        maximumMarks: q.maximumMarks,
+        text: q.text,
+      });
+    }
+    return questionMap;
+  }
+
+  // Fallback to exam metadata if individual Question records are not populated
+  const exam = await Exam.findById(examId);
+  if (exam && exam.totalQuestions > 0) {
+    const defaultMaxMarks = exam.maximumMarks
+      ? Math.round((exam.maximumMarks / exam.totalQuestions) * 100) / 100
+      : 100;
+    for (let i = 1; i <= exam.totalQuestions; i++) {
+      questionMap.set(i, {
+        questionNumber: i,
+        maximumMarks: defaultMaxMarks,
+        text: `Question ${i}`,
+      });
+    }
+  }
+
+  return questionMap;
+}
+
+/**
+ * Authoritative question mark validator and total calculator.
+ * Strictly verifies against official database questions:
+ * - Rejects duplicate question numbers
+ * - Rejects unknown question numbers
+ * - Validates marks are between 0 and maximumMarks
+ * - Ensures NOT_ATTEMPTED has zero marks
+ * - Rejects invalid statuses
+ * - On submit, ensures every expected question is present and evaluated (no NOT_STARTED)
+ * - Returns the authoritative backend-computed total
+ */
+export function validateQuestionMarksList(
+  questionMarks: IEvaluationQuestionMark[],
+  authoritativeQuestions: Map<number, IAuthoritativeQuestion>,
+  isSubmitting = false
+): { validatedList: IEvaluationQuestionMark[]; computedTotal: number } {
+  const seenQuestions = new Set<number>();
+  const VALID_STATUSES = ['NOT_STARTED', 'MARKED', 'FLAGGED', 'NOT_ATTEMPTED'] as const;
+
+  for (const qm of questionMarks) {
+    // 1. Check duplicate question number
+    if (seenQuestions.has(qm.questionNumber)) {
+      const error: any = new Error(
+        `Duplicate question number detected: Q${qm.questionNumber}. Each question must only appear once.`
+      );
+      error.status = 400;
+      error.code = 'DUPLICATE_QUESTION_NUMBER';
+      throw error;
+    }
+    seenQuestions.add(qm.questionNumber);
+
+    // 2. Check unknown question number
+    if (authoritativeQuestions.size > 0 && !authoritativeQuestions.has(qm.questionNumber)) {
+      const error: any = new Error(
+        `Unknown question number: Q${qm.questionNumber}. This question is not part of the examination specifications.`
+      );
+      error.status = 400;
+      error.code = 'UNKNOWN_QUESTION_NUMBER';
+      throw error;
+    }
+
+    // 3. Check invalid status
+    if (!VALID_STATUSES.includes(qm.status as any)) {
+      const error: any = new Error(
+        `Invalid status '${qm.status}' for question Q${qm.questionNumber}. Allowed statuses: ${VALID_STATUSES.join(', ')}.`
+      );
+      error.status = 400;
+      error.code = 'INVALID_QUESTION_STATUS';
+      throw error;
+    }
+
+    // 4. Validate marks is a number
+    const marksNum = Number(qm.marks);
+    if (typeof qm.marks !== 'number' || isNaN(marksNum)) {
+      const error: any = new Error(
+        `Invalid marks value for question Q${qm.questionNumber}: Marks must be a valid number.`
+      );
+      error.status = 400;
+      error.code = 'INVALID_MARKS';
+      throw error;
+    }
+
+    // 5. Ensure marks are not negative
+    if (marksNum < 0) {
+      const error: any = new Error(
+        `Negative marks detected for question Q${qm.questionNumber} (${marksNum}). Marks cannot be negative.`
+      );
+      error.status = 400;
+      error.code = 'INVALID_MARKS_NEGATIVE';
+      throw error;
+    }
+
+    // 6. Ensure marks do not exceed question maximumMarks
+    const officialQ = authoritativeQuestions.get(qm.questionNumber);
+    if (officialQ && marksNum > officialQ.maximumMarks) {
+      const error: any = new Error(
+        `Question Q${qm.questionNumber} marks (${marksNum}) exceed the maximum allowed marks (${officialQ.maximumMarks}).`
+      );
+      error.status = 400;
+      error.code = 'MARKS_EXCEED_MAXIMUM';
+      throw error;
+    }
+
+    // 7. Ensure NOT_ATTEMPTED has zero marks
+    if (qm.status === 'NOT_ATTEMPTED' && marksNum !== 0) {
+      const error: any = new Error(
+        `Question Q${qm.questionNumber} is marked as NOT_ATTEMPTED but has non-zero marks (${marksNum}). Questions not attempted must have 0 marks.`
+      );
+      error.status = 400;
+      error.code = 'INVALID_NOT_ATTEMPTED_MARKS';
+      throw error;
+    }
+
+    // 8. Ensure NOT_STARTED has zero marks
+    if (qm.status === 'NOT_STARTED' && marksNum !== 0) {
+      const error: any = new Error(
+        `Question Q${qm.questionNumber} is marked as NOT_STARTED but has non-zero marks (${marksNum}). Questions not started must have 0 marks.`
+      );
+      error.status = 400;
+      error.code = 'INVALID_NOT_STARTED_MARKS';
+      throw error;
+    }
+  }
+
+  // 9. On SUBMIT: Every expected question must have exactly one valid evaluation state
+  if (isSubmitting && authoritativeQuestions.size > 0) {
+    for (const [qNum] of authoritativeQuestions.entries()) {
+      if (!seenQuestions.has(qNum)) {
+        const error: any = new Error(
+          `Missing question entry: Question Q${qNum} is required but missing from the submission.`
+        );
+        error.status = 400;
+        error.code = 'MISSING_QUESTION_EVALUATION';
+        throw error;
+      }
+    }
+
+    // Also ensure no question remains in NOT_STARTED state upon submission
+    for (const qm of questionMarks) {
+      if (qm.status === 'NOT_STARTED') {
+        const error: any = new Error(
+          `Question Q${qm.questionNumber} has not been evaluated. Every question must have an explicit evaluated status (MARKED, FLAGGED, or NOT_ATTEMPTED) before submission.`
+        );
+        error.status = 400;
+        error.code = 'QUESTION_UNMARKED';
+        throw error;
+      }
+    }
+  }
+
+  // Authoritative total marks calculation:
+  // only MARKED and FLAGGED statuses contribute marks
+  const computedTotal = questionMarks
+    .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
+    .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
+
+  return { validatedList: questionMarks, computedTotal };
+}
 
 export async function fetchEvaluations(
   query: { status?: string },
@@ -145,7 +331,10 @@ export async function updateEvaluationMarks(
     throw error;
   }
 
-  if (evaluation.examinerId.toString() !== examinerId) {
+  if (
+    evaluation.examinerId.toString() !== examinerId &&
+    (evaluation.examinerId as any)._id?.toString() !== examinerId
+  ) {
     const error: any = new Error('Access denied: You do not own this evaluation');
     error.status = 403;
     error.code = 'ACCESS_DENIED';
@@ -159,14 +348,41 @@ export async function updateEvaluationMarks(
     throw error;
   }
 
+  const answerBook = await AnswerBook.findById(evaluation.answerBookId);
+  if (!answerBook) {
+    const error: any = new Error('Associated answer book not found');
+    error.status = 404;
+    error.code = 'ANSWER_BOOK_NOT_FOUND';
+    throw error;
+  }
+
+  const examId =
+    typeof answerBook.examId === 'object' && answerBook.examId !== null && '_id' in (answerBook.examId as any)
+      ? (answerBook.examId as any)._id
+      : answerBook.examId;
+
+  // 1. Fetch authoritative questions for this exam from MongoDB
+  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId);
+
+  // 2. Validate and calculate authoritative total
   if (data.questionMarks && Array.isArray(data.questionMarks)) {
-    evaluation.questionMarks = data.questionMarks;
-    const computedTotal = data.questionMarks
-      .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
-      .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
-    evaluation.totalMarks = data.totalMarks !== undefined ? data.totalMarks : computedTotal;
-  } else if (data.totalMarks !== undefined) {
-    evaluation.totalMarks = data.totalMarks;
+    const { validatedList, computedTotal } = validateQuestionMarksList(
+      data.questionMarks,
+      authoritativeQuestions,
+      false // draft update
+    );
+
+    evaluation.questionMarks = validatedList;
+    // Discard any frontend-provided data.totalMarks; authoritative calculation only
+    evaluation.totalMarks = computedTotal;
+  } else {
+    // If only remarks were updated, recalculate total from existing question marks
+    const { computedTotal } = validateQuestionMarksList(
+      evaluation.questionMarks || [],
+      authoritativeQuestions,
+      false
+    );
+    evaluation.totalMarks = computedTotal;
   }
 
   if (data.remarks !== undefined) evaluation.remarks = data.remarks;
@@ -177,7 +393,12 @@ export async function updateEvaluationMarks(
     action: 'EVALUATION_UPDATED',
     entityType: 'Evaluation',
     entityId: evaluation._id.toString(),
-    metadata: { totalMarks: evaluation.totalMarks },
+    metadata: {
+      totalMarks: evaluation.totalMarks,
+      questionCount: evaluation.questionMarks.length,
+      answerBookId: evaluation.answerBookId.toString(),
+      timestamp: new Date().toISOString(),
+    },
   });
 
   emitToAll('evaluation.updated', { evaluationId: evaluation._id });
@@ -198,7 +419,10 @@ export async function submitEvaluationFinal(
     throw error;
   }
 
-  if (evaluation.examinerId.toString() !== examinerId) {
+  if (
+    evaluation.examinerId.toString() !== examinerId &&
+    (evaluation.examinerId as any)._id?.toString() !== examinerId
+  ) {
     const error: any = new Error('Access denied: You do not own this evaluation');
     error.status = 403;
     error.code = 'ACCESS_DENIED';
@@ -220,59 +444,56 @@ export async function submitEvaluationFinal(
     throw error;
   }
 
-  // If question marks provided with submission, save them first
-  if (data.questionMarks && Array.isArray(data.questionMarks)) {
-    evaluation.questionMarks = data.questionMarks;
+  const examId =
+    typeof answerBook.examId === 'object' && answerBook.examId !== null && '_id' in (answerBook.examId as any)
+      ? (answerBook.examId as any)._id
+      : answerBook.examId;
+
+  // 1. Fetch official questions for the exam from MongoDB
+  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId);
+
+  // 2. Build target question marks from submission payload or already saved state
+  const targetQuestionMarks =
+    data.questionMarks && Array.isArray(data.questionMarks) && data.questionMarks.length > 0
+      ? data.questionMarks
+      : evaluation.questionMarks;
+
+  if (!targetQuestionMarks || targetQuestionMarks.length === 0) {
+    const error: any = new Error('Cannot submit evaluation: No question marks provided or saved');
+    error.status = 400;
+    error.code = 'NO_QUESTION_MARKS';
+    throw error;
   }
 
-  // Deterministic validation rules:
-  const examQuestions = await Question.find({ examId: answerBook.examId });
+  // 3. Strict submission validation against authoritative questions:
+  // - reject duplicate question numbers
+  // - reject unknown question numbers
+  // - reject missing required question entries
+  // - validate every question against official question
+  // - ensure marks between 0 and maximumMarks
+  // - ensure NOT_ATTEMPTED has zero marks
+  // - ensure invalid statuses are rejected
+  // - every expected question must have exactly one valid evaluation state
+  const { validatedList, computedTotal } = validateQuestionMarksList(
+    targetQuestionMarks,
+    authoritativeQuestions,
+    true // isSubmitting = true
+  );
 
-  if (examQuestions.length > 0) {
-    const marksMap = new Map<number, IEvaluationQuestionMark>();
-    (evaluation.questionMarks || []).forEach((qm) => {
-      marksMap.set(qm.questionNumber, qm);
-    });
-
-    for (const q of examQuestions) {
-      const qMark = marksMap.get(q.questionNumber);
-      if (!qMark || qMark.status === 'NOT_STARTED') {
-        const error: any = new Error(
-          `Question Q${q.questionNumber} has not been evaluated. Every question must have an explicit status before submission.`
-        );
-        error.status = 400;
-        error.code = 'QUESTION_UNMARKED';
-        throw error;
-      }
-
-      if (qMark.marks < 0) {
-        const error: any = new Error(
-          `Question Q${q.questionNumber} has negative marks (${qMark.marks}). Marks cannot be negative.`
-        );
-        error.status = 400;
-        error.code = 'INVALID_MARKS_NEGATIVE';
-        throw error;
-      }
-
-      if (qMark.marks > q.maximumMarks) {
-        const error: any = new Error(
-          `Question Q${q.questionNumber} score (${qMark.marks}) exceeds the maximum allowed marks (${q.maximumMarks}).`
-        );
-        error.status = 400;
-        error.code = 'MARKS_EXCEED_MAXIMUM';
-        throw error;
-      }
-    }
-
-    // Auto-calculate total marks from questions
-    const computedTotal = (evaluation.questionMarks || [])
-      .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
-      .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
-
-    evaluation.totalMarks = computedTotal;
-  } else if (data.totalMarks !== undefined) {
-    evaluation.totalMarks = data.totalMarks;
+  // 4. Validate against examination maximumMarks if available
+  const exam = await Exam.findById(examId);
+  if (exam && exam.maximumMarks && computedTotal > exam.maximumMarks) {
+    const error: any = new Error(
+      `Total calculated marks (${computedTotal}) exceed examination maximum allowed (${exam.maximumMarks}).`
+    );
+    error.status = 400;
+    error.code = 'TOTAL_EXCEEDS_EXAM_MAXIMUM';
+    throw error;
   }
+
+  // 5. Store ONLY the backend-calculated total
+  evaluation.questionMarks = validatedList;
+  evaluation.totalMarks = computedTotal;
 
   // Validate state transition
   validateStateTransition(answerBook.status, 'SUBMITTED');
@@ -300,6 +521,8 @@ export async function submitEvaluationFinal(
     metadata: {
       totalMarks: evaluation.totalMarks,
       answerBookId: evaluation.answerBookId.toString(),
+      questionCount: evaluation.questionMarks.length,
+      timestamp: new Date().toISOString(),
     },
   });
 
