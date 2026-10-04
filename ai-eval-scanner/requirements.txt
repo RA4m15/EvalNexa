@@ -1,0 +1,5 @@
+# AI-EVAL-OpenCV Scanner Integration Dependencies
+numpy>=1.26.0
+opencv-python>=4.8.0
+matplotlib>=3.8.0
+flask>=3.0.0

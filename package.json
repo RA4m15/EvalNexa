@@ -14,7 +14,8 @@
     "build": "pnpm -r build",
     "seed": "pnpm --filter backend seed",
     "create-admin": "pnpm --filter backend create-admin",
-    "seed-users": "pnpm --filter backend seed-users"
+    "seed-users": "pnpm --filter backend seed-users",
+    "scanner": "python ai-eval-scanner/server.py"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
