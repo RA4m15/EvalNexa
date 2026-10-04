@@ -11,6 +11,7 @@ import {
   getQuestionsForExam,
   createQuestion,
 } from '../controllers/questions.controller';
+import { getResultsForExam } from '../controllers/results.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import {
@@ -38,5 +39,8 @@ router.post(
   validate(createQuestionSchema),
   createQuestion
 );
+
+// Result routes nested under exams
+router.get('/:examId/results', authorize('ADMIN', 'MODERATOR', 'EXAMINER'), getResultsForExam);
 
 export default router;

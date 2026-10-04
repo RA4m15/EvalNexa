@@ -26,6 +26,10 @@ export async function createNewQuestion(
     text: string;
     maximumMarks: number;
     rubric?: IQuestionRubricItem[];
+    referenceAnswer?: string;
+    keyConcepts?: string[];
+    gradingNotes?: string;
+    evaluationLanguage?: string;
   },
   actorId: string
 ): Promise<IQuestion> {
@@ -53,6 +57,10 @@ export async function createNewQuestion(
     text: data.text,
     maximumMarks: data.maximumMarks,
     rubric: data.rubric || [],
+    ...(data.referenceAnswer !== undefined ? { referenceAnswer: data.referenceAnswer } : {}),
+    ...(data.keyConcepts !== undefined ? { keyConcepts: data.keyConcepts } : {}),
+    ...(data.gradingNotes !== undefined ? { gradingNotes: data.gradingNotes } : {}),
+    ...(data.evaluationLanguage !== undefined ? { evaluationLanguage: data.evaluationLanguage } : {}),
   });
 
   await logAuditAction({

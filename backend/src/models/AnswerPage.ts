@@ -92,6 +92,7 @@ const AnswerPageSchema = new Schema<IAnswerPage>(
         'FINALIZING',
         'FINALIZED',
         'READY_FOR_EVALUATION',
+        'COMPLETED',
         'ERROR',
       ],
       default: 'RECEIVED',

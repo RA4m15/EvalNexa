@@ -5,6 +5,7 @@ import {
   getAnswerBookById,
   updateAnswerBook,
   assignAnswerBook,
+  finalizeAnswerBookController,
   getExaminerAnswerBooks,
   ingestAnswerBook,
   updateProcessingStatus,
@@ -53,6 +54,7 @@ router.post('/', authorize('ADMIN'), validate(createAnswerBookSchema), createAns
 router.get('/:id', getAnswerBookById);
 router.patch('/:id', authorize('ADMIN'), updateAnswerBook);
 router.post('/:id/assign', authorize('ADMIN'), validate(assignAnswerBookSchema), assignAnswerBook);
+router.post('/:id/finalize', authorize('ADMIN'), finalizeAnswerBookController);
 
 // Digital Script Pages & Media
 router.get('/:id/pages', getAnswerBookPages);

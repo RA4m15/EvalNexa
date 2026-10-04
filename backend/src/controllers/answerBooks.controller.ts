@@ -686,3 +686,32 @@ export async function addAnswerBookPage(req: AuthRequest, res: Response): Promis
     });
   }
 }
+
+/**
+ * Strict finalization of an AnswerBook (Admin only).
+ * Performs thorough validation: page count, sequential 1..N, valid Cloudinary metadata,
+ * acceptable quality, no rescan required, and completed status.
+ */
+export async function finalizeAnswerBookController(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const answerBook = await answerBooksService.validateAndFinalizeAnswerBook(id, {
+      id: req.user!._id.toString(),
+      name: req.user!.name,
+      role: req.user!.role,
+    });
+
+    res.json({
+      success: true,
+      message: 'Answer book validated and finalized successfully',
+      data: answerBook,
+    });
+  } catch (error: any) {
+    const status = error.status || 400;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to finalize answer book',
+      code: error.code || 'FINALIZATION_ERROR',
+    });
+  }
+}
