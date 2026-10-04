@@ -172,7 +172,7 @@ def process_image(
         sharpness_score, blur_flagged = compute_sharpness_score(laplacian_var)
 
         # Fatal defect check for blur
-        is_blur_fatal = any(d.defect_type in ("OPTICAL_DEFOCUS", "MOTION_BLUR") for d in p5_res.fatal_defects)
+        is_blur_fatal = any(d.defect_code in ("FATAL_OPTICAL_DEFOCUS", "OPTICAL_DEFOCUS", "MOTION_BLUR") for d in p5_res.fatal_defects)
         blur_detected = blur_flagged or is_blur_fatal
 
         # -------------------------------------------------------------------

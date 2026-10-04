@@ -118,6 +118,36 @@ class TestScannerIntegration(unittest.TestCase):
         self.assertEqual(res.headers.get("Access-Control-Allow-Origin"), "*")
         print("  [PASS] test_05_options_preflight: 204 No Content with CORS preflight headers")
 
+    def test_06_fatal_defect_rescan_required(self):
+        """Verify POST /process-page returns RESCAN_REQUIRED with actionable reason on defective image without AttributeError."""
+        defective_img_path = os.path.join(CURRENT_DIR, "images", "answer_sheet_4.jpg")
+        if not os.path.exists(defective_img_path):
+            self.skipTest(f"Defective test image not found at {defective_img_path}")
+
+        with open(defective_img_path, "rb") as f:
+            img_bytes = f.read()
+
+        file_tuple = (io.BytesIO(img_bytes), "answer_sheet_4.jpg")
+        res = self.client.post(
+            "/process-page",
+            data={
+                "file": file_tuple,
+                "pageNumber": "4",
+                "examId": "exam_math_101",
+                "answerBookCode": "AB-2026-MATH-001",
+            },
+            content_type="multipart/form-data",
+        )
+
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertIsNotNone(data)
+        self.assertEqual(data.get("qualityStatus"), "RESCAN_REQUIRED")
+        self.assertIsInstance(data.get("reason"), str)
+        self.assertTrue(len(data.get("reason", "").strip()) > 0)
+        self.assertIn(data.get("ocrReadiness"), ["READY", "UNCLEAR", "FAILED"])
+        print(f"  [PASS] test_06_fatal_defect_rescan_required: 200 OK, qualityStatus=RESCAN_REQUIRED, reason='{data['reason'][:60]}...'")
+
 
 if __name__ == "__main__":
     print("=" * 70)
