@@ -401,6 +401,10 @@ def integrate_production_scanner(
         deskewed, M_affine = deskew_frame_limited_page(image, skew_info, interp_method=interp_flag)
         notes.append("Rigid 2D affine deskew executed. Image canvas dimensions preserved.")
 
+        framing_meta = dict(p2_result.framing_metadata)
+        if p2_result.selected_box is not None:
+            framing_meta["selected_box"] = p2_result.selected_box
+
         return ScannedDocumentResult(
             status="DESKEWED_FRAME_LIMITED",
             scanned_image=deskewed,
@@ -411,7 +415,7 @@ def integrate_production_scanner(
             source_corners=None,
             aspect_ratio=w_img / max(1, h_img),
             interpolation_used=interp_name,
-            framing_metadata=p2_result.framing_metadata,
+            framing_metadata=framing_meta,
             is_reading_orientation_resolved=False,
             processing_notes=notes
         )

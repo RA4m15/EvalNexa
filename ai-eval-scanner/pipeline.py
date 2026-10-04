@@ -92,7 +92,7 @@ def process_image(
     Executes the full end-to-end AI-EVAL scanning pipeline.
     Returns a dictionary strictly compatible with EvalNexa's ProcessPageResult:
     {
-        "qualityStatus": "PASSED" | "RESCAN_REQUIRED",
+        "qualityStatus": "PASSED" | "HUMAN_REVIEW" | "RESCAN_REQUIRED",
         "blurDetected": bool,
         "sharpness": float,
         "orientation": str,
@@ -142,6 +142,22 @@ def process_image(
         # -------------------------------------------------------------------
         try:
             p3_res = integrate_production_scanner(input_path)
+
+            # Document / page validity gate (Step 2A): prevent unresolvable/non-document inputs from reaching Phase 5
+            if p3_res.status == "AMBIGUOUS_UNWARPED":
+                return {
+                    "qualityStatus": "RESCAN_REQUIRED",
+                    "blurDetected": False,
+                    "sharpness": 0.0,
+                    "orientation": "NORMAL",
+                    "pageDetected": False,
+                    "cropReady": False,
+                    "ocrReadiness": "FAILED",
+                    "reason": "No document detected. Please ensure the answer sheet is clearly visible within the camera viewfinder.",
+                    "processedImageUrl": None,
+                    "ocrText": "",
+                }
+
             rectified_bgr = p3_res.scanned_image
             if rectified_bgr is None or rectified_bgr.size == 0:
                 raise ValueError("Phase 3 returned an empty scanned image")
@@ -167,8 +183,16 @@ def process_image(
 
         # -------------------------------------------------------------------
         # STEP 2: Quality Assessment (Phase 5)
-        # -------------------------------------------------------------------
-        p5_res = assess_document_quality(rectified_gray, document_id)
+        doc_box = None
+        if p3_res.status == "DESKEWED_FRAME_LIMITED" and p3_res.framing_metadata:
+            doc_box = p3_res.framing_metadata.get("selected_box")
+
+        p5_res = assess_document_quality(
+            rectified_gray,
+            document_id,
+            document_box=doc_box,
+            scanner_status=p3_res.status,
+        )
         laplacian_var = float(p5_res.evidence_profile.diagnostic_laplacian_variance)
         sharpness_score, blur_flagged = compute_sharpness_score(laplacian_var)
 
@@ -196,6 +220,9 @@ def process_image(
         if p7_res.decision == "CONTINUE":
             quality_status = "PASSED"
             reason = None
+        elif p7_res.decision == "HUMAN_REVIEW":
+            quality_status = "HUMAN_REVIEW"
+            reason = p7_res.actionable_operator_guidance or f"Defect flagged: {p7_res.primary_trigger}"
         else:
             quality_status = "RESCAN_REQUIRED"
             reason = p7_res.actionable_operator_guidance or f"Defect flagged: {p7_res.primary_trigger}"
