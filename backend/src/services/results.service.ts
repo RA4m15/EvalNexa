@@ -12,6 +12,37 @@ import { logAuditAction } from './audit.service';
 import { emitToAll } from '../sockets';
 
 /**
+ * Pure institutional grading helper converting authoritative percentage to grade,
+ * grade points, and formal degree classification.
+ */
+export function calculateGradeAndClassification(percentage: number): {
+  grade: string;
+  gradePoint: number;
+  classification: string;
+} {
+  const rounded = Math.round(percentage * 100) / 100;
+  if (rounded >= 90) {
+    return { grade: 'A+', gradePoint: 10, classification: 'FIRST_CLASS_DISTINCTION' };
+  }
+  if (rounded >= 80) {
+    return { grade: 'A', gradePoint: 9, classification: 'FIRST_CLASS_DISTINCTION' };
+  }
+  if (rounded >= 70) {
+    return { grade: 'B+', gradePoint: 8, classification: 'FIRST_CLASS' };
+  }
+  if (rounded >= 60) {
+    return { grade: 'B', gradePoint: 7, classification: 'HIGHER_SECOND_CLASS' };
+  }
+  if (rounded >= 50) {
+    return { grade: 'C', gradePoint: 6, classification: 'SECOND_CLASS' };
+  }
+  if (rounded >= 40) {
+    return { grade: 'P', gradePoint: 4, classification: 'PASS' };
+  }
+  return { grade: 'F', gradePoint: 0, classification: 'FAIL' };
+}
+
+/**
  * Finalizes an approved evaluation into an authoritative certified examination Result.
  * Idempotent: Subsequent calls return the existing finalized result without duplicate generation.
  */
@@ -69,12 +100,21 @@ export async function finalizeEvaluationResult(
     .populate('answerBookId', 'answerBookCode studentCode pageCount status')
     .populate('evaluationId', 'totalMarks questionMarks status remarks')
     .populate('examinerId', 'name email')
-    .populate('finalizedBy', 'name email');
+    .populate('finalizedBy', 'name email')
+    .populate('publishedBy', 'name email');
 
   if (existingResult) {
     if (answerBook.status !== 'FINALIZED') {
       answerBook.status = 'FINALIZED';
       await answerBook.save();
+    }
+    // Backfill grade calculation if missing on legacy records
+    if (!existingResult.grade && typeof existingResult.percentage === 'number') {
+      const { grade, gradePoint, classification } = calculateGradeAndClassification(existingResult.percentage);
+      existingResult.grade = grade;
+      existingResult.gradePoint = gradePoint;
+      existingResult.classification = classification;
+      await existingResult.save();
     }
     return existingResult;
   }
@@ -169,6 +209,8 @@ export async function finalizeEvaluationResult(
       ? Math.round((computedTotal / examMaximumMarks) * 10000) / 100
       : 0;
 
+  const { grade, gradePoint, classification } = calculateGradeAndClassification(percentage);
+
   // 8. Update evaluation totalMarks with authoritative calculation
   evaluation.questionMarks = validatedList;
   evaluation.totalMarks = computedTotal;
@@ -186,6 +228,9 @@ export async function finalizeEvaluationResult(
         totalMarks: computedTotal,
         maximumMarks: examMaximumMarks,
         percentage,
+        grade,
+        gradePoint,
+        classification,
         status: 'FINALIZED',
         finalizedAt: new Date(),
         finalizedBy: new mongoose.Types.ObjectId(actorId),
@@ -205,6 +250,7 @@ export async function finalizeEvaluationResult(
   await result.populate('evaluationId', 'totalMarks questionMarks status remarks');
   await result.populate('examinerId', 'name email');
   await result.populate('finalizedBy', 'name email');
+  await result.populate('publishedBy', 'name email');
 
   // 12. Create AuditLog
   await logAuditAction({
@@ -223,6 +269,9 @@ export async function finalizeEvaluationResult(
       totalMarks: computedTotal,
       maximumMarks: examMaximumMarks,
       percentage,
+      grade,
+      gradePoint,
+      classification,
       timestamp: new Date().toISOString(),
     },
   });
@@ -236,12 +285,296 @@ export async function finalizeEvaluationResult(
 }
 
 /**
+ * Publishes a finalized Result to make it officially accessible on the institutional ledger.
+ */
+export async function publishResult(
+  resultId: string,
+  actorId: string,
+  actor?: { name?: string; role?: string }
+): Promise<IResult> {
+  const result = await Result.findById(resultId);
+
+  if (!result) {
+    const error: any = new Error('Result record not found');
+    error.status = 404;
+    error.code = 'RESULT_NOT_FOUND';
+    throw error;
+  }
+
+  result.status = 'PUBLISHED';
+  result.publishedAt = new Date();
+  result.publishedBy = new mongoose.Types.ObjectId(actorId);
+  result.withheldReason = undefined;
+
+  await result.save();
+
+  await result.populate('examId', 'title subjectCode subjectName maximumMarks academicSession');
+  await result.populate('answerBookId', 'answerBookCode studentCode pageCount status');
+  await result.populate('evaluationId', 'totalMarks questionMarks status remarks');
+  await result.populate('examinerId', 'name email');
+  await result.populate('finalizedBy', 'name email');
+  await result.populate('publishedBy', 'name email');
+
+  await logAuditAction({
+    actorId,
+    actorName: actor?.name || 'Academic Administrator',
+    actorRole: actor?.role || 'ADMIN',
+    action: 'RESULT_PUBLISHED',
+    entityType: 'Result',
+    entityId: result._id.toString(),
+    metadata: {
+      resultId: result._id.toString(),
+      totalMarks: result.totalMarks,
+      percentage: result.percentage,
+      grade: result.grade,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  emitToAll('result.published', { result });
+  emitToAll('result.updated', { result });
+
+  return result;
+}
+
+/**
+ * Publishes all finalized Results for a given examination in a single batch operation.
+ */
+export async function publishResultsForExam(
+  examId: string,
+  actorId: string,
+  actor?: { name?: string; role?: string }
+): Promise<{ success: boolean; publishedCount: number; message: string }> {
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    const error: any = new Error('Examination not found');
+    error.status = 404;
+    error.code = 'EXAM_NOT_FOUND';
+    throw error;
+  }
+
+  const now = new Date();
+  const actorObjectId = new mongoose.Types.ObjectId(actorId);
+
+  const updateResult = await Result.updateMany(
+    { examId: exam._id, status: 'FINALIZED' },
+    {
+      $set: {
+        status: 'PUBLISHED',
+        publishedAt: now,
+        publishedBy: actorObjectId,
+      },
+    }
+  );
+
+  const publishedCount = updateResult.modifiedCount;
+
+  await logAuditAction({
+    actorId,
+    actorName: actor?.name || 'Academic Administrator',
+    actorRole: actor?.role || 'ADMIN',
+    action: 'EXAM_RESULTS_PUBLISHED',
+    entityType: 'Exam',
+    entityId: examId,
+    metadata: {
+      examId,
+      publishedCount,
+      timestamp: now.toISOString(),
+    },
+  });
+
+  emitToAll('result.published', { examId, publishedCount });
+
+  return {
+    success: true,
+    publishedCount,
+    message: `Successfully published ${publishedCount} examination result(s).`,
+  };
+}
+
+/**
+ * Flags a result as WITHHELD with an authoritative audit rationale.
+ */
+export async function withholdResult(
+  resultId: string,
+  reason: string,
+  actorId: string,
+  actor?: { name?: string; role?: string }
+): Promise<IResult> {
+  if (!reason || !reason.trim()) {
+    const error: any = new Error('A valid reason is required to withhold an examination result.');
+    error.status = 400;
+    error.code = 'MISSING_WITHHOLD_REASON';
+    throw error;
+  }
+
+  const result = await Result.findById(resultId);
+  if (!result) {
+    const error: any = new Error('Result record not found');
+    error.status = 404;
+    error.code = 'RESULT_NOT_FOUND';
+    throw error;
+  }
+
+  result.status = 'WITHHELD';
+  result.withheldReason = reason.trim();
+  await result.save();
+
+  await result.populate('examId', 'title subjectCode subjectName maximumMarks academicSession');
+  await result.populate('answerBookId', 'answerBookCode studentCode pageCount status');
+  await result.populate('evaluationId', 'totalMarks questionMarks status remarks');
+  await result.populate('examinerId', 'name email');
+  await result.populate('finalizedBy', 'name email');
+  await result.populate('publishedBy', 'name email');
+
+  await logAuditAction({
+    actorId,
+    actorName: actor?.name || 'Academic Administrator',
+    actorRole: actor?.role || 'ADMIN',
+    action: 'RESULT_WITHHELD',
+    entityType: 'Result',
+    entityId: result._id.toString(),
+    metadata: {
+      resultId: result._id.toString(),
+      reason: reason.trim(),
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  emitToAll('result.withheld', { result, reason: reason.trim() });
+  emitToAll('result.updated', { result });
+
+  return result;
+}
+
+/**
+ * Releases a withheld result back to FINALIZED or PUBLISHED status.
+ */
+export async function releaseWithheldResult(
+  resultId: string,
+  actorId: string,
+  actor?: { name?: string; role?: string }
+): Promise<IResult> {
+  const result = await Result.findById(resultId);
+  if (!result) {
+    const error: any = new Error('Result record not found');
+    error.status = 404;
+    error.code = 'RESULT_NOT_FOUND';
+    throw error;
+  }
+
+  if (result.status !== 'WITHHELD') {
+    return result;
+  }
+
+  // Restore to PUBLISHED if it was published prior to withholding, else FINALIZED
+  result.status = result.publishedAt ? 'PUBLISHED' : 'FINALIZED';
+  result.withheldReason = undefined;
+  await result.save();
+
+  await result.populate('examId', 'title subjectCode subjectName maximumMarks academicSession');
+  await result.populate('answerBookId', 'answerBookCode studentCode pageCount status');
+  await result.populate('evaluationId', 'totalMarks questionMarks status remarks');
+  await result.populate('examinerId', 'name email');
+  await result.populate('finalizedBy', 'name email');
+  await result.populate('publishedBy', 'name email');
+
+  await logAuditAction({
+    actorId,
+    actorName: actor?.name || 'Academic Administrator',
+    actorRole: actor?.role || 'ADMIN',
+    action: 'RESULT_RELEASED',
+    entityType: 'Result',
+    entityId: result._id.toString(),
+    metadata: {
+      resultId: result._id.toString(),
+      restoredStatus: result.status,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  emitToAll('result.updated', { result });
+
+  return result;
+}
+
+/**
+ * Batch finalizes all APPROVED evaluations for an examination in one coordinated pass.
+ */
+export async function batchFinalizeApprovedEvaluations(
+  examId: string,
+  actorId: string,
+  actor?: { name?: string; role?: string }
+): Promise<{
+  success: boolean;
+  finalizedCount: number;
+  totalApproved: number;
+  errors: Array<{ evaluationId: string; error: string }>;
+}> {
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    const error: any = new Error('Examination not found');
+    error.status = 404;
+    error.code = 'EXAM_NOT_FOUND';
+    throw error;
+  }
+
+  // Find all answer books for this exam that are APPROVED
+  const approvedBooks = await AnswerBook.find({ examId, status: 'APPROVED' });
+  const bookIds = approvedBooks.map((b) => b._id);
+
+  // Find all evaluations for these approved books that are also APPROVED
+  const approvedEvals = await Evaluation.find({
+    answerBookId: { $in: bookIds },
+    status: 'APPROVED',
+  });
+
+  const errors: Array<{ evaluationId: string; error: string }> = [];
+  let finalizedCount = 0;
+
+  for (const evalDoc of approvedEvals) {
+    try {
+      await finalizeEvaluationResult(evalDoc._id.toString(), actorId, actor);
+      finalizedCount++;
+    } catch (err: any) {
+      errors.push({
+        evaluationId: evalDoc._id.toString(),
+        error: err.message || 'Finalization failed',
+      });
+    }
+  }
+
+  await logAuditAction({
+    actorId,
+    actorName: actor?.name || 'Academic Administrator',
+    actorRole: actor?.role || 'ADMIN',
+    action: 'BATCH_FINALIZATION_COMPLETED',
+    entityType: 'Exam',
+    entityId: examId,
+    metadata: {
+      examId,
+      finalizedCount,
+      totalApproved: approvedEvals.length,
+      errorsCount: errors.length,
+      timestamp: new Date().toISOString(),
+    },
+  });
+
+  return {
+    success: true,
+    finalizedCount,
+    totalApproved: approvedEvals.length,
+    errors,
+  };
+}
+
+/**
  * Fetches certified examination results with optional exam and status filters.
  */
 export async function fetchResults(query: { examId?: string; status?: string }) {
   const filter: Record<string, unknown> = {};
   if (query.examId) filter.examId = query.examId;
-  if (query.status) filter.status = query.status;
+  if (query.status && query.status !== 'ALL') filter.status = query.status;
 
   return Result.find(filter)
     .populate('examId', 'title subjectCode subjectName maximumMarks academicSession')
@@ -249,6 +582,7 @@ export async function fetchResults(query: { examId?: string; status?: string }) 
     .populate('evaluationId', 'totalMarks questionMarks status remarks')
     .populate('examinerId', 'name email')
     .populate('finalizedBy', 'name email')
+    .populate('publishedBy', 'name email')
     .sort({ finalizedAt: -1 });
 }
 
@@ -262,6 +596,7 @@ export async function fetchResultsForExam(examId: string) {
     .populate('evaluationId', 'totalMarks questionMarks status remarks')
     .populate('examinerId', 'name email')
     .populate('finalizedBy', 'name email')
+    .populate('publishedBy', 'name email')
     .sort({ finalizedAt: -1 });
 }
 
@@ -274,7 +609,8 @@ export async function fetchResultById(id: string) {
     .populate('answerBookId', 'answerBookCode studentCode pageCount status')
     .populate('evaluationId', 'totalMarks questionMarks status remarks')
     .populate('examinerId', 'name email')
-    .populate('finalizedBy', 'name email');
+    .populate('finalizedBy', 'name email')
+    .populate('publishedBy', 'name email');
 
   if (!result) {
     const error: any = new Error('Result record not found');

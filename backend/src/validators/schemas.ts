@@ -97,6 +97,29 @@ export const questionMarkSchema = z.object({
   marks: z.number().min(0),
   status: z.enum(['NOT_STARTED', 'MARKED', 'FLAGGED', 'NOT_ATTEMPTED']),
   comment: z.string().optional(),
+  aiAnalysis: z
+    .object({
+      suggestedMarks: z.number().optional(),
+      minMarks: z.number().optional(),
+      maxMarks: z.number().optional(),
+      confidence: z.number().optional(),
+      needsHumanReview: z.boolean().optional(),
+      criteria: z
+        .array(
+          z.object({
+            name: z.string().optional(),
+            maxMarks: z.number().optional(),
+            awardedMarks: z.number().optional(),
+            evidence: z.string().optional(),
+          })
+        )
+        .optional(),
+      missingConcepts: z.array(z.string()).optional(),
+      reasoningSummary: z.string().optional(),
+      generatedAt: z.union([z.string(), z.date()]).optional(),
+      model: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const updateEvaluationSchema = z.object({

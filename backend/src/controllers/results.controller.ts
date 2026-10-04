@@ -103,3 +103,167 @@ export async function getResultById(req: AuthRequest, res: Response): Promise<vo
     });
   }
 }
+
+/**
+ * Controller to publish a single finalized result to the public/institutional ledger.
+ */
+export async function publishResult(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const actorId = req.user!._id.toString();
+    const actor = {
+      name: req.user!.name,
+      role: req.user!.role,
+    };
+
+    const result = await resultsService.publishResult(id, actorId, actor);
+
+    res.json({
+      success: true,
+      message: 'Examination result successfully published',
+      data: result,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to publish examination result',
+      code: error.code || 'PUBLISH_RESULT_ERROR',
+    });
+  }
+}
+
+/**
+ * Controller to batch publish all finalized results for an examination.
+ */
+export async function publishExamResults(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { examId } = req.body;
+    if (!examId) {
+      res.status(400).json({
+        success: false,
+        message: 'Exam ID is required to publish exam results',
+        code: 'MISSING_EXAM_ID',
+      });
+      return;
+    }
+
+    const actorId = req.user!._id.toString();
+    const actor = {
+      name: req.user!.name,
+      role: req.user!.role,
+    };
+
+    const result = await resultsService.publishResultsForExam(examId, actorId, actor);
+
+    res.json({
+      success: true,
+      message: result.message,
+      data: result,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to publish examination results',
+      code: error.code || 'PUBLISH_EXAM_RESULTS_ERROR',
+    });
+  }
+}
+
+/**
+ * Controller to withhold a result with justification.
+ */
+export async function withholdResult(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+    const actorId = req.user!._id.toString();
+    const actor = {
+      name: req.user!.name,
+      role: req.user!.role,
+    };
+
+    const result = await resultsService.withholdResult(id, reason, actorId, actor);
+
+    res.json({
+      success: true,
+      message: 'Examination result flagged as withheld',
+      data: result,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to withhold result',
+      code: error.code || 'WITHHOLD_RESULT_ERROR',
+    });
+  }
+}
+
+/**
+ * Controller to release a previously withheld result back into circulation.
+ */
+export async function releaseResult(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const actorId = req.user!._id.toString();
+    const actor = {
+      name: req.user!.name,
+      role: req.user!.role,
+    };
+
+    const result = await resultsService.releaseWithheldResult(id, actorId, actor);
+
+    res.json({
+      success: true,
+      message: 'Examination result released from withheld status',
+      data: result,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to release withheld result',
+      code: error.code || 'RELEASE_RESULT_ERROR',
+    });
+  }
+}
+
+/**
+ * Controller to batch-finalize all approved evaluations for an examination.
+ */
+export async function batchFinalizeResults(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { examId } = req.body;
+    if (!examId) {
+      res.status(400).json({
+        success: false,
+        message: 'Exam ID is required to batch finalize results',
+        code: 'MISSING_EXAM_ID',
+      });
+      return;
+    }
+
+    const actorId = req.user!._id.toString();
+    const actor = {
+      name: req.user!.name,
+      role: req.user!.role,
+    };
+
+    const result = await resultsService.batchFinalizeApprovedEvaluations(examId, actorId, actor);
+
+    res.json({
+      success: true,
+      message: `Batch finalization complete: ${result.finalizedCount} of ${result.totalApproved} approved scripts certified.`,
+      data: result,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to batch finalize results',
+      code: error.code || 'BATCH_FINALIZE_ERROR',
+    });
+  }
+}

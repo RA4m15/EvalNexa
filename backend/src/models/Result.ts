@@ -10,9 +10,15 @@ export interface IResult extends Document {
   totalMarks: number;
   maximumMarks: number;
   percentage: number;
+  grade?: string;
+  gradePoint?: number;
+  classification?: string;
   status: ResultStatus;
   finalizedAt: Date;
   finalizedBy: mongoose.Types.ObjectId;
+  publishedAt?: Date;
+  publishedBy?: mongoose.Types.ObjectId;
+  withheldReason?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +67,20 @@ const ResultSchema = new Schema<IResult>(
       min: 0,
       max: 100,
     },
+    grade: {
+      type: String,
+      trim: true,
+      uppercase: true,
+    },
+    gradePoint: {
+      type: Number,
+      min: 0,
+      max: 10,
+    },
+    classification: {
+      type: String,
+      trim: true,
+    },
     status: {
       type: String,
       enum: ['FINALIZED', 'PUBLISHED', 'WITHHELD'],
@@ -76,6 +96,17 @@ const ResultSchema = new Schema<IResult>(
       type: Schema.Types.ObjectId,
       ref: 'User',
       required: true,
+    },
+    publishedAt: {
+      type: Date,
+    },
+    publishedBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    },
+    withheldReason: {
+      type: String,
+      trim: true,
     },
   },
   { timestamps: true }

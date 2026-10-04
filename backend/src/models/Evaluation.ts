@@ -78,23 +78,29 @@ const EvaluationSchema = new Schema<IEvaluation>(
         },
         comment: { type: String, trim: true },
         aiAnalysis: {
-          suggestedMarks: { type: Number },
-          minMarks: { type: Number },
-          maxMarks: { type: Number },
-          confidence: { type: Number },
-          needsHumanReview: { type: Boolean },
-          criteria: [
+          type: new Schema(
             {
-              name: { type: String },
+              suggestedMarks: { type: Number },
+              minMarks: { type: Number },
               maxMarks: { type: Number },
-              awardedMarks: { type: Number },
-              evidence: { type: String },
+              confidence: { type: Number },
+              needsHumanReview: { type: Boolean },
+              criteria: [
+                {
+                  name: { type: String },
+                  maxMarks: { type: Number },
+                  awardedMarks: { type: Number },
+                  evidence: { type: String },
+                },
+              ],
+              missingConcepts: { type: [String], default: undefined },
+              reasoningSummary: { type: String },
+              generatedAt: { type: Date },
+              model: { type: String },
             },
-          ],
-          missingConcepts: { type: [String] },
-          reasoningSummary: { type: String },
-          generatedAt: { type: Date },
-          model: { type: String },
+            { _id: false }
+          ),
+          default: undefined,
         },
       },
     ],

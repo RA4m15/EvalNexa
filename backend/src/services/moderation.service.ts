@@ -2,9 +2,16 @@ import { Evaluation } from '../models/Evaluation';
 import { AnswerBook } from '../models/AnswerBook';
 import { Moderation } from '../models/Moderation';
 import { User } from '../models/User';
+import { Exam } from '../models/Exam';
+import { Question } from '../models/Question';
+import { AnswerPage } from '../models/AnswerPage';
 import { validateStateTransition } from './answerBooks.service';
 import { logAuditAction } from './audit.service';
 import { emitToAll } from '../sockets';
+import {
+  fetchAuthoritativeQuestions,
+  validateQuestionMarksList,
+} from './evaluations.service';
 
 export async function fetchModerationQueue(status?: string) {
   const filter: Record<string, unknown> = {};
@@ -122,9 +129,70 @@ export async function approveEvaluationByModerator(id: string, moderatorId: stri
     throw error;
   }
 
+  // Reject approval if script requires rescan
+  if (answerBook.qualityStatus === 'RESCAN_REQUIRED') {
+    const error: any = new Error(
+      `Cannot approve evaluation: Answer book '${answerBook.answerBookCode}' is marked as RESCAN_REQUIRED.`
+    );
+    error.status = 400;
+    error.code = 'RESCAN_REQUIRED';
+    throw error;
+  }
+
+  // Authoritatively validate question marks against examination specification
+  const examId =
+    typeof answerBook.examId === 'object' && answerBook.examId !== null && '_id' in (answerBook.examId as any)
+      ? (answerBook.examId as any)._id
+      : answerBook.examId;
+
+  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId);
+
+  if (!evaluation.questionMarks || evaluation.questionMarks.length === 0) {
+    const error: any = new Error('Cannot approve evaluation: Evaluation has no question marks recorded.');
+    error.status = 400;
+    error.code = 'NO_QUESTION_MARKS';
+    throw error;
+  }
+
+  const { validatedList, computedTotal } = validateQuestionMarksList(
+    evaluation.questionMarks as any,
+    authoritativeQuestions,
+    true // isSubmitting = true (all questions must be evaluated and within boundaries)
+  );
+
+  const exam = await Exam.findById(examId);
+  const examMaximumMarks =
+    exam?.maximumMarks ||
+    (authoritativeQuestions.size > 0
+      ? Array.from(authoritativeQuestions.values()).reduce((sum, q) => sum + q.maximumMarks, 0)
+      : 100);
+
+  if (computedTotal > examMaximumMarks) {
+    const error: any = new Error(
+      `Cannot approve evaluation: Total calculated marks (${computedTotal}) exceed examination maximum (${examMaximumMarks}).`
+    );
+    error.status = 400;
+    error.code = 'TOTAL_EXCEEDS_EXAM_MAXIMUM';
+    throw error;
+  }
+
+  if (
+    typeof evaluation.totalMarks === 'number' &&
+    Math.abs(evaluation.totalMarks - computedTotal) > 0.001
+  ) {
+    const error: any = new Error(
+      `Cannot approve evaluation: Recorded total marks (${evaluation.totalMarks}) does not equal computed sum of questions (${computedTotal}).`
+    );
+    error.status = 400;
+    error.code = 'TOTAL_MARKS_MISMATCH';
+    throw error;
+  }
+
   // Validate state transition
   validateStateTransition(answerBook.status, 'APPROVED');
 
+  evaluation.questionMarks = validatedList as any;
+  evaluation.totalMarks = computedTotal;
   evaluation.status = 'APPROVED';
   await evaluation.save();
 
@@ -166,6 +234,14 @@ export async function returnEvaluationByModerator(
   reason: string,
   moderatorId: string
 ) {
+  const trimmedReason = (reason || '').trim();
+  if (trimmedReason.length < 5) {
+    const error: any = new Error('Please provide a reason of at least 5 characters');
+    error.status = 400;
+    error.code = 'INVALID_RETURN_REASON';
+    throw error;
+  }
+
   let evaluation = await Evaluation.findById(id);
   if (!evaluation) {
     const mod = await Moderation.findById(id);
@@ -200,7 +276,7 @@ export async function returnEvaluationByModerator(
   validateStateTransition(answerBook.status, 'RETURNED');
 
   evaluation.status = 'RETURNED';
-  evaluation.remarks = reason;
+  evaluation.remarks = trimmedReason;
   await evaluation.save();
 
   answerBook.status = 'RETURNED';
@@ -212,7 +288,7 @@ export async function returnEvaluationByModerator(
     moderatorId,
     status: 'RETURNED',
     decision: 'RETURN',
-    reason,
+    reason: trimmedReason,
   });
 
   await evaluation.populate({
@@ -268,12 +344,14 @@ export interface IIntegrityIssue {
   examinerName: string;
   description: string;
   timestamp: string;
+  evaluationId?: string;
+  answerBookId?: string;
 }
 
 export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
   const issues: IIntegrityIssue[] = [];
 
-  // Query submitted, approved, returned, under_review evaluations with answer books and exams
+  // Query evaluations with answer books and exams
   const evaluations = await Evaluation.find()
     .populate({
       path: 'answerBookId',
@@ -290,6 +368,27 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
     }
   }
 
+  // Pre-fetch official question rubrics for distinct exams
+  const distinctExamIds = Array.from(
+    new Set(
+      evaluations
+        .map((ev) => {
+          const ab = ev.answerBookId as any;
+          return ab?.examId?._id?.toString() || ab?.examId?.toString();
+        })
+        .filter(Boolean)
+    )
+  );
+
+  const officialQuestions = await Question.find({ examId: { $in: distinctExamIds } }).select(
+    'examId questionNumber maximumMarks'
+  );
+
+  const examQuestionMaxMarks = new Map<string, number>();
+  for (const q of officialQuestions) {
+    examQuestionMaxMarks.set(`${q.examId.toString()}_${q.questionNumber}`, q.maximumMarks);
+  }
+
   for (const ev of evaluations) {
     const ab = ev.answerBookId as any;
     const exam = ab?.examId as any;
@@ -297,6 +396,9 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
     const abCode = ab?.answerBookCode || 'UNKNOWN';
     const examCode = exam?.subjectCode || '—';
     const examinerName = examiner?.name || 'Unassigned';
+    const examIdStr = exam?._id?.toString() || (typeof ab?.examId === 'string' ? ab.examId : '');
+    const evalIdStr = ev._id.toString();
+    const abIdStr = ab?._id?.toString();
 
     // 1. Duplicate evaluation check
     if (ab?._id && (abMap.get(ab._id.toString()) || 0) > 1) {
@@ -307,6 +409,8 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
         answerBookCode: abCode,
         examCode,
         examinerName,
+        evaluationId: evalIdStr,
+        answerBookId: abIdStr,
         description: `Multiple evaluation records point to the same answer book (${abCode}).`,
         timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
       });
@@ -322,12 +426,14 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
         answerBookCode: abCode,
         examCode,
         examinerName,
+        evaluationId: evalIdStr,
+        answerBookId: abIdStr,
         description: `Total marks awarded (${totalMarks}) exceeds the exam maximum (${exam.maximumMarks}).`,
         timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
       });
     }
 
-    // 3. Invalid totals (sum of questionMarks != totalMarks)
+    // 3. Question-level checks & Arithmetic totals
     if (ev.questionMarks && ev.questionMarks.length > 0) {
       const sum = ev.questionMarks.reduce((acc, q) => acc + (q.marks || 0), 0);
       if (Math.abs(sum - totalMarks) > 0.01) {
@@ -338,6 +444,8 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
           answerBookCode: abCode,
           examCode,
           examinerName,
+          evaluationId: evalIdStr,
+          answerBookId: abIdStr,
           description: `Total marks (${totalMarks}) does not match the sum of individual question marks (${sum}).`,
           timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
         });
@@ -353,7 +461,40 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
             answerBookCode: abCode,
             examCode,
             examinerName,
+            evaluationId: evalIdStr,
+            answerBookId: abIdStr,
             description: `Question ${q.questionNumber} was assigned a negative score (${q.marks}).`,
+            timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
+          });
+        }
+
+        const maxRubricMarks = examIdStr ? examQuestionMaxMarks.get(`${examIdStr}_${q.questionNumber}`) : undefined;
+        if (maxRubricMarks !== undefined && q.marks > maxRubricMarks) {
+          issues.push({
+            id: `rubric-exceeded-${ev._id}-Q${q.questionNumber}`,
+            ruleName: 'Question Mark Exceeds Rubric Limit',
+            severity: 'HIGH',
+            answerBookCode: abCode,
+            examCode,
+            examinerName,
+            evaluationId: evalIdStr,
+            answerBookId: abIdStr,
+            description: `Question ${q.questionNumber} was awarded ${q.marks} marks exceeding maximum rubric allowed (${maxRubricMarks}).`,
+            timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
+          });
+        }
+
+        if (q.status === 'NOT_ATTEMPTED' && q.marks > 0) {
+          issues.push({
+            id: `not-attempted-marks-${ev._id}-Q${q.questionNumber}`,
+            ruleName: 'Unattempted Question Awarded Marks',
+            severity: 'HIGH',
+            answerBookCode: abCode,
+            examCode,
+            examinerName,
+            evaluationId: evalIdStr,
+            answerBookId: abIdStr,
+            description: `Question ${q.questionNumber} was recorded as NOT_ATTEMPTED but awarded ${q.marks} mark(s).`,
             timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
           });
         }
@@ -361,10 +502,10 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
     }
 
     // 4. Incomplete evaluation for submitted scripts
-    if (['SUBMITTED', 'APPROVED'].includes(ev.status)) {
+    if (['SUBMITTED', 'UNDER_REVIEW', 'APPROVED'].includes(ev.status)) {
       if (exam && exam.totalQuestions && ev.questionMarks) {
         const accounted = ev.questionMarks.filter(
-          (q) => q.status === 'MARKED' || q.status === 'NOT_ATTEMPTED'
+          (q) => q.status === 'MARKED' || q.status === 'NOT_ATTEMPTED' || q.status === 'FLAGGED'
         ).length;
         if (accounted < exam.totalQuestions) {
           issues.push({
@@ -374,15 +515,55 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
             answerBookCode: abCode,
             examCode,
             examinerName,
+            evaluationId: evalIdStr,
+            answerBookId: abIdStr,
             description: `Script was submitted with only ${accounted} of ${exam.totalQuestions} questions accounted for.`,
             timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
           });
         }
       }
     }
+
+    // 5. Rescan required breach on active evaluation
+    if (ab?.qualityStatus === 'RESCAN_REQUIRED' && ['SUBMITTED', 'UNDER_REVIEW', 'APPROVED', 'IN_PROGRESS'].includes(ev.status)) {
+      issues.push({
+        id: `rescan-active-${ev._id}`,
+        ruleName: 'Rescan Required Pending Evaluation',
+        severity: 'HIGH',
+        answerBookCode: abCode,
+        examCode,
+        examinerName,
+        evaluationId: evalIdStr,
+        answerBookId: abIdStr,
+        description: `Script ${abCode} is marked RESCAN_REQUIRED by scanner quality check, but has active evaluation (${ev.status}).`,
+        timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
+      });
+    }
+
+    // 6. Custody State Desynchronization
+    if (ab && ev.status) {
+      const isDesynced =
+        (ev.status === 'APPROVED' && ab.status !== 'APPROVED' && ab.status !== 'FINALIZED') ||
+        (ev.status === 'RETURNED' && ab.status !== 'RETURNED') ||
+        (ev.status === 'SUBMITTED' && ab.status !== 'SUBMITTED' && ab.status !== 'UNDER_REVIEW');
+      if (isDesynced) {
+        issues.push({
+          id: `custody-desync-${ev._id}`,
+          ruleName: 'Custody State Desynchronization',
+          severity: 'HIGH',
+          answerBookCode: abCode,
+          examCode,
+          examinerName,
+          evaluationId: evalIdStr,
+          answerBookId: abIdStr,
+          description: `Answer book state (${ab.status}) does not match evaluation custody status (${ev.status}).`,
+          timestamp: ev.updatedAt ? new Date(ev.updatedAt).toISOString() : new Date().toISOString(),
+        });
+      }
+    }
   }
 
-  // 5. Missing pages check on AnswerBooks
+  // 7. Missing pages check on AnswerBooks
   const defectiveBooks = await AnswerBook.find({ pageCount: { $lte: 0 } }).populate('examId', 'subjectCode');
   for (const db of defectiveBooks) {
     const exam = db.examId as any;
@@ -393,8 +574,40 @@ export async function fetchIntegrityChecks(): Promise<IIntegrityIssue[]> {
       answerBookCode: db.answerBookCode,
       examCode: exam?.subjectCode || '—',
       examinerName: 'System Scanner',
+      answerBookId: db._id.toString(),
       description: `Answer book registered with invalid or zero page count (${db.pageCount} pages).`,
       timestamp: new Date(db.createdAt).toISOString(),
+    });
+  }
+
+  // 8. Defective / Failed Ingestion Pages on AnswerBooks
+  const defectivePages = await AnswerPage.find({
+    $or: [
+      { 'quality.status': 'RESCAN_REQUIRED' },
+      { processingStatus: 'FAILED' },
+    ],
+  }).populate({
+    path: 'answerBookId',
+    populate: { path: 'examId', select: 'subjectCode' },
+  });
+
+  for (const page of defectivePages) {
+    const pageAb = page.answerBookId as any;
+    const pageExam = pageAb?.examId as any;
+    const reason =
+      page.quality?.status === 'RESCAN_REQUIRED'
+        ? 'unacceptable blur/legibility quality score'
+        : 'processing pipeline failure';
+    issues.push({
+      id: `defective-page-${page._id}`,
+      ruleName: 'Scanned Page Ingestion Defect',
+      severity: 'MEDIUM',
+      answerBookCode: pageAb?.answerBookCode || 'UNKNOWN',
+      examCode: pageExam?.subjectCode || '—',
+      examinerName: 'Scanner Ingestion',
+      answerBookId: pageAb?._id?.toString(),
+      description: `Page ${page.pageNumber} flagged with ${reason}.`,
+      timestamp: page.updatedAt ? new Date(page.updatedAt).toISOString() : new Date().toISOString(),
     });
   }
 

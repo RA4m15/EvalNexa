@@ -32,5 +32,15 @@ router.post(
   authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
   getAIEvaluationSuggestion
 );
+router.post(
+  '/:id/questions/:questionNumber/ai-suggest',
+  authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
+  getAIEvaluationSuggestion
+);
+router.post(
+  '/:evaluationId/questions/:questionNumber/ai-suggest',
+  authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
+  getAIEvaluationSuggestion
+);
 
 export default router;

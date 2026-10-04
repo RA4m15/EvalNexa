@@ -66,11 +66,91 @@ export async function fetchAuthoritativeQuestions(
  * - On submit, ensures every expected question is present and evaluated (no NOT_STARTED)
  * - Returns the authoritative backend-computed total
  */
+export interface QuestionMarksValidationSummary {
+  totalExpected: number;
+  evaluatedQuestions: number;
+  notAttemptedQuestions: number;
+  flaggedQuestions: number;
+  unansweredQuestions: number;
+  missingQuestionNumbers: number[];
+}
+
+export function computeQuestionMarksSummary(
+  questionMarks: IEvaluationQuestionMark[],
+  authoritativeQuestions: Map<number, IAuthoritativeQuestion>
+): QuestionMarksValidationSummary {
+  const seenQuestions = new Set<number>();
+  let evaluatedQuestions = 0;
+  let notAttemptedQuestions = 0;
+  let flaggedQuestions = 0;
+  let unansweredQuestions = 0;
+  const missingQuestionNumbers: number[] = [];
+
+  for (const qm of questionMarks) {
+    seenQuestions.add(qm.questionNumber);
+    if (qm.status === 'MARKED') {
+      evaluatedQuestions++;
+    } else if (qm.status === 'NOT_ATTEMPTED') {
+      notAttemptedQuestions++;
+    } else if (qm.status === 'FLAGGED') {
+      flaggedQuestions++;
+    } else if (qm.status === 'NOT_STARTED') {
+      unansweredQuestions++;
+      if (!missingQuestionNumbers.includes(qm.questionNumber)) {
+        missingQuestionNumbers.push(qm.questionNumber);
+      }
+    }
+  }
+
+  // Also check if any authoritative questions were not included in questionMarks at all
+  if (authoritativeQuestions.size > 0) {
+    for (const qNum of authoritativeQuestions.keys()) {
+      if (!seenQuestions.has(qNum)) {
+        unansweredQuestions++;
+        if (!missingQuestionNumbers.includes(qNum)) {
+          missingQuestionNumbers.push(qNum);
+        }
+      }
+    }
+  }
+
+  const totalExpected = authoritativeQuestions.size > 0
+    ? authoritativeQuestions.size
+    : Math.max(questionMarks.length, 1);
+
+  missingQuestionNumbers.sort((a, b) => a - b);
+
+  return {
+    totalExpected,
+    evaluatedQuestions,
+    notAttemptedQuestions,
+    flaggedQuestions,
+    unansweredQuestions,
+    missingQuestionNumbers,
+  };
+}
+
+/**
+ * Validates question marks list against authoritative questions and examination rules:
+ * - Determines total expected, evaluated, not-attempted, flagged, unanswered, and invalid marks
+ * - Rejects duplicate question numbers
+ * - Rejects unknown question numbers
+ * - Rejects marks out of bounds [0, maxMarks]
+ * - Rejects non-zero marks for NOT_ATTEMPTED or NOT_STARTED
+ * - Rejects invalid statuses
+ * - On submit, ensures every expected question is present and evaluated (no NOT_STARTED)
+ * - Returns the authoritative backend-computed total and summary
+ */
 export function validateQuestionMarksList(
   questionMarks: IEvaluationQuestionMark[],
   authoritativeQuestions: Map<number, IAuthoritativeQuestion>,
   isSubmitting = false
-): { validatedList: IEvaluationQuestionMark[]; computedTotal: number } {
+): {
+  validatedList: IEvaluationQuestionMark[];
+  computedTotal: number;
+  summary: QuestionMarksValidationSummary;
+} {
+  const summary = computeQuestionMarksSummary(questionMarks, authoritativeQuestions);
   const seenQuestions = new Set<number>();
   const VALID_STATUSES = ['NOT_STARTED', 'MARKED', 'FLAGGED', 'NOT_ATTEMPTED'] as const;
 
@@ -161,27 +241,37 @@ export function validateQuestionMarksList(
 
   // 9. On SUBMIT: Every expected question must have exactly one valid evaluation state
   if (isSubmitting && authoritativeQuestions.size > 0) {
+    const missingKeys: number[] = [];
     for (const [qNum] of authoritativeQuestions.entries()) {
       if (!seenQuestions.has(qNum)) {
-        const error: any = new Error(
-          `Missing question entry: Question Q${qNum} is required but missing from the submission.`
-        );
-        error.status = 400;
-        error.code = 'MISSING_QUESTION_EVALUATION';
-        throw error;
+        missingKeys.push(qNum);
       }
+    }
+    if (missingKeys.length > 0) {
+      const error: any = new Error(
+        `Missing question entry: Question ${missingKeys.map(k => `Q${k}`).join(', ')} is required but missing from the submission.`
+      );
+      error.status = 400;
+      error.code = 'MISSING_QUESTION_EVALUATION';
+      error.details = { summary, missingQuestions: missingKeys };
+      throw error;
     }
 
     // Also ensure no question remains in NOT_STARTED state upon submission
+    const unstartedKeys: number[] = [];
     for (const qm of questionMarks) {
       if (qm.status === 'NOT_STARTED') {
-        const error: any = new Error(
-          `Question Q${qm.questionNumber} has not been evaluated. Every question must have an explicit evaluated status (MARKED, FLAGGED, or NOT_ATTEMPTED) before submission.`
-        );
-        error.status = 400;
-        error.code = 'QUESTION_UNMARKED';
-        throw error;
+        unstartedKeys.push(qm.questionNumber);
       }
+    }
+    if (unstartedKeys.length > 0) {
+      const error: any = new Error(
+        `Question ${unstartedKeys.map(k => `Q${k}`).join(', ')} has not been evaluated. Every question must have an explicit evaluated status (MARKED, FLAGGED, or NOT_ATTEMPTED) before submission.`
+      );
+      error.status = 400;
+      error.code = 'QUESTION_UNMARKED';
+      error.details = { summary, unstartedQuestions: unstartedKeys };
+      throw error;
     }
   }
 
@@ -191,7 +281,7 @@ export function validateQuestionMarksList(
     .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
     .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
 
-  return { validatedList: questionMarks, computedTotal };
+  return { validatedList: questionMarks, computedTotal, summary };
 }
 
 export async function fetchEvaluations(
@@ -477,7 +567,7 @@ export async function submitEvaluationFinal(
   // - ensure NOT_ATTEMPTED has zero marks
   // - ensure invalid statuses are rejected
   // - every expected question must have exactly one valid evaluation state
-  const { validatedList, computedTotal } = validateQuestionMarksList(
+  const { validatedList, computedTotal, summary } = validateQuestionMarksList(
     targetQuestionMarks,
     authoritativeQuestions,
     true // isSubmitting = true
@@ -523,16 +613,26 @@ export async function submitEvaluationFinal(
     entityId: evaluation._id.toString(),
     metadata: {
       totalMarks: evaluation.totalMarks,
+      maximumMarks: exam?.maximumMarks,
       answerBookId: evaluation.answerBookId.toString(),
+      totalExpected: summary.totalExpected,
+      evaluatedQuestions: summary.evaluatedQuestions,
+      notAttemptedQuestions: summary.notAttemptedQuestions,
+      flaggedQuestions: summary.flaggedQuestions,
+      unansweredQuestions: summary.unansweredQuestions,
       questionCount: evaluation.questionMarks.length,
       timestamp: new Date().toISOString(),
     },
   });
 
-  emitToAll('evaluation.submitted', { evaluation, answerBook });
-  emitToRole('MODERATOR', 'evaluation.submitted', { evaluation, answerBook });
+  emitToAll('answerbook.status.changed', {
+    answerBookId: answerBook._id,
+    status: 'SUBMITTED',
+  });
+  emitToAll('evaluation.submitted', { evaluation, answerBook, summary });
+  emitToRole('MODERATOR', 'evaluation.submitted', { evaluation, answerBook, summary });
 
-  return { evaluation, answerBook };
+  return { evaluation, answerBook, summary };
 }
 
 /**
@@ -586,7 +686,7 @@ export async function requestAISuggestionForQuestion(
   );
   const existingQm = existingIndex >= 0 ? evaluation.questionMarks[existingIndex] : null;
 
-  if (existingQm?.aiAnalysis && !options.forceRefresh) {
+  if (existingQm?.aiAnalysis?.generatedAt && !options.forceRefresh) {
     return {
       cached: true,
       aiAnalysis: existingQm.aiAnalysis,

@@ -334,6 +334,8 @@ export interface IntegrityIssue {
   examinerName: string;
   description: string;
   timestamp: string;
+  evaluationId?: string;
+  answerBookId?: string;
 }
 
 export interface ExaminerAnalyticsItem {
@@ -362,9 +364,15 @@ export interface Result {
   totalMarks: number;
   maximumMarks: number;
   percentage: number;
+  grade?: string;
+  gradePoint?: number;
+  classification?: string;
   status: ResultStatus;
   finalizedAt: string;
   finalizedBy: string | User;
+  publishedAt?: string;
+  publishedBy?: string | User;
+  withheldReason?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -389,6 +397,8 @@ export type SocketEvent =
   | 'moderation.approved'
   | 'moderation.returned'
   | 'result.finalized'
+  | 'result.published'
+  | 'result.withheld'
   | 'result.updated'
   | 'user.created';
 

@@ -5,12 +5,36 @@ import { Evaluation, Exam, AnswerBook, User, Result } from '@evalnexa/types';
 import { StatusBadge } from '../components/StatusBadge';
 import { useSocketEvents } from '../hooks/useSocketEvents';
 
+function formatClassification(classification?: string): string {
+  if (!classification) return '—';
+  switch (classification) {
+    case 'FIRST_CLASS_DISTINCTION':
+      return 'First Class Distinction';
+    case 'FIRST_CLASS':
+      return 'First Class';
+    case 'HIGHER_SECOND_CLASS':
+      return 'Higher Second Class';
+    case 'SECOND_CLASS':
+      return 'Second Class';
+    case 'PASS':
+      return 'Pass Division';
+    case 'FAIL':
+      return 'Fail / Unsatisfactory';
+    default:
+      return classification.replace(/_/g, ' ');
+  }
+}
+
 export function ResultsPage() {
   const queryClient = useQueryClient();
   const [selectedExamId, setSelectedExamId] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<string>('FINALIZED'); // Default to certified finalized records
+  const [statusFilter, setStatusFilter] = useState<string>('CERTIFIED_ALL'); // Default to all certified records
   const [actionError, setActionError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Withholding modal state
+  const [withholdModalResultId, setWithholdModalResultId] = useState<string | null>(null);
+  const [withholdReasonInput, setWithholdReasonInput] = useState<string>('');
 
   // 1. Fetch real Certified Results from MongoDB /api/results
   const { data: results = [], isLoading: isLoadingResults } = useQuery<Result[]>({
@@ -53,6 +77,16 @@ export function ResultsPage() {
   // Live Socket.IO invalidation
   const handlers = useCallback(() => ({
     'result.finalized': () => {
+      queryClient.invalidateQueries({ queryKey: ['results-records'] });
+      queryClient.invalidateQueries({ queryKey: ['results-evaluations'] });
+      queryClient.invalidateQueries({ queryKey: ['results-answerbooks'] });
+    },
+    'result.published': () => {
+      queryClient.invalidateQueries({ queryKey: ['results-records'] });
+      queryClient.invalidateQueries({ queryKey: ['results-evaluations'] });
+      queryClient.invalidateQueries({ queryKey: ['results-answerbooks'] });
+    },
+    'result.withheld': () => {
       queryClient.invalidateQueries({ queryKey: ['results-records'] });
       queryClient.invalidateQueries({ queryKey: ['results-evaluations'] });
       queryClient.invalidateQueries({ queryKey: ['results-answerbooks'] });
@@ -114,7 +148,31 @@ export function ResultsPage() {
       : results;
   }, [results, selectedExamId]);
 
-  // Finalization Mutation: POST /api/results/:evaluationId/finalize
+  // Specific filtered result records based on statusFilter
+  const displayResults = useMemo(() => {
+    if (statusFilter === 'CERTIFIED_ALL') {
+      return examScopedResults;
+    }
+    if (statusFilter === 'PUBLISHED') {
+      return examScopedResults.filter((r) => r.status === 'PUBLISHED');
+    }
+    if (statusFilter === 'FINALIZED') {
+      return examScopedResults.filter((r) => r.status === 'FINALIZED');
+    }
+    if (statusFilter === 'WITHHELD') {
+      return examScopedResults.filter((r) => r.status === 'WITHHELD');
+    }
+    return examScopedResults;
+  }, [examScopedResults, statusFilter]);
+
+  // Mutations
+  const invalidateAll = () => {
+    queryClient.invalidateQueries({ queryKey: ['results-records'] });
+    queryClient.invalidateQueries({ queryKey: ['results-evaluations'] });
+    queryClient.invalidateQueries({ queryKey: ['results-answerbooks'] });
+  };
+
+  // 1. Single Finalization Mutation: POST /api/results/:evaluationId/finalize
   const finalizeMutation = useMutation({
     mutationFn: async (evaluationId: string) => {
       const { data } = await apiClient.post(`/results/${evaluationId}/finalize`);
@@ -123,12 +181,104 @@ export function ResultsPage() {
     onSuccess: () => {
       setSuccessMsg('Result successfully verified and certified into official institutional register.');
       setActionError(null);
-      queryClient.invalidateQueries({ queryKey: ['results-records'] });
-      queryClient.invalidateQueries({ queryKey: ['results-evaluations'] });
-      queryClient.invalidateQueries({ queryKey: ['results-answerbooks'] });
+      invalidateAll();
     },
     onError: (err: any) => {
       const msg = err.response?.data?.message || 'Failed to finalize examination result.';
+      setActionError(msg);
+      setSuccessMsg(null);
+    },
+  });
+
+  // 2. Publish Single Result Mutation: POST /api/results/:id/publish
+  const publishMutation = useMutation({
+    mutationFn: async (resultId: string) => {
+      const { data } = await apiClient.post(`/results/${resultId}/publish`);
+      return data.data;
+    },
+    onSuccess: () => {
+      setSuccessMsg('Examination result published to official institutional ledger.');
+      setActionError(null);
+      invalidateAll();
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message || 'Failed to publish examination result.';
+      setActionError(msg);
+      setSuccessMsg(null);
+    },
+  });
+
+  // 3. Withhold Result Mutation: POST /api/results/:id/withhold
+  const withholdMutation = useMutation({
+    mutationFn: async ({ resultId, reason }: { resultId: string; reason: string }) => {
+      const { data } = await apiClient.post(`/results/${resultId}/withhold`, { reason });
+      return data.data;
+    },
+    onSuccess: () => {
+      setSuccessMsg('Result successfully flagged as withheld in the governance register.');
+      setActionError(null);
+      setWithholdModalResultId(null);
+      setWithholdReasonInput('');
+      invalidateAll();
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message || 'Failed to withhold examination result.';
+      setActionError(msg);
+      setSuccessMsg(null);
+    },
+  });
+
+  // 4. Release Result Mutation: POST /api/results/:id/release
+  const releaseMutation = useMutation({
+    mutationFn: async (resultId: string) => {
+      const { data } = await apiClient.post(`/results/${resultId}/release`);
+      return data.data;
+    },
+    onSuccess: () => {
+      setSuccessMsg('Withheld result released and restored to active certified status.');
+      setActionError(null);
+      invalidateAll();
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message || 'Failed to release withheld result.';
+      setActionError(msg);
+      setSuccessMsg(null);
+    },
+  });
+
+  // 5. Batch Publish Exam Mutation: POST /api/results/publish-exam
+  const publishExamMutation = useMutation({
+    mutationFn: async (examId: string) => {
+      const { data } = await apiClient.post('/results/publish-exam', { examId });
+      return data.data;
+    },
+    onSuccess: (data) => {
+      setSuccessMsg(data?.message || 'Examination results batch published successfully.');
+      setActionError(null);
+      invalidateAll();
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message || 'Failed to publish examination results.';
+      setActionError(msg);
+      setSuccessMsg(null);
+    },
+  });
+
+  // 6. Batch Finalize Mutation: POST /api/results/batch-finalize
+  const batchFinalizeMutation = useMutation({
+    mutationFn: async (examId: string) => {
+      const { data } = await apiClient.post('/results/batch-finalize', { examId });
+      return data.data;
+    },
+    onSuccess: (data) => {
+      setSuccessMsg(
+        `Batch finalization complete: ${data?.finalizedCount ?? 0} approved script(s) certified.`
+      );
+      setActionError(null);
+      invalidateAll();
+    },
+    onError: (err: any) => {
+      const msg = err.response?.data?.message || 'Failed to batch finalize results.';
       setActionError(msg);
       setSuccessMsg(null);
     },
@@ -142,9 +292,14 @@ export function ResultsPage() {
     ['SUBMITTED', 'UNDER_REVIEW'].includes(b.status)
   ).length;
   const approvedCount = examScopedBooks.filter((b) => b.status === 'APPROVED').length;
+  
   const finalizedCount = examScopedResults.length > 0 
     ? examScopedResults.length 
     : examScopedBooks.filter((b) => b.status === 'FINALIZED').length;
+
+  const publishedCount = examScopedResults.filter((r) => r.status === 'PUBLISHED').length;
+  const withheldCount = examScopedResults.filter((r) => r.status === 'WITHHELD').length;
+  const finalizedUnpublishedCount = examScopedResults.filter((r) => r.status === 'FINALIZED').length;
 
   // Evaluations that are approved by moderation but awaiting result finalization
   const approvedAwaitingFinalization = useMemo(() => {
@@ -157,7 +312,7 @@ export function ResultsPage() {
   // Real Export CSV
   const handleExportCSV = () => {
     if (examScopedResults.length === 0) {
-      alert('No finalized result records available for export.');
+      alert('No certified result records available for export.');
       return;
     }
 
@@ -167,12 +322,18 @@ export function ResultsPage() {
       'Subject Code',
       'Examination Title',
       'Accredited Examiner',
-      'Marks',
+      'Marks Awarded',
       'Maximum Marks',
       'Percentage',
+      'Grade',
+      'Grade Points',
+      'Classification',
       'Status',
       'Finalized At',
       'Finalized By',
+      'Published At',
+      'Published By',
+      'Withheld Reason',
     ];
 
     const rows = examScopedResults.map((r) => {
@@ -180,6 +341,7 @@ export function ResultsPage() {
       const exam = typeof r.examId === 'object' ? (r.examId as Exam) : null;
       const examiner = typeof r.examinerId === 'object' ? (r.examinerId as User) : null;
       const certifier = typeof r.finalizedBy === 'object' ? (r.finalizedBy as User) : null;
+      const publisher = typeof r.publishedBy === 'object' ? (r.publishedBy as User) : null;
 
       return [
         `"${ab?.studentCode || '—'}"`,
@@ -190,9 +352,15 @@ export function ResultsPage() {
         r.totalMarks,
         r.maximumMarks,
         `"${r.percentage}%"`,
+        `"${r.grade || '—'}"`,
+        r.gradePoint !== undefined ? r.gradePoint : '—',
+        `"${formatClassification(r.classification)}"`,
         r.status,
         `"${r.finalizedAt ? new Date(r.finalizedAt).toLocaleString() : '—'}"`,
         `"${certifier?.name || 'Examination Board'}"`,
+        `"${r.publishedAt ? new Date(r.publishedAt).toLocaleString() : '—'}"`,
+        `"${publisher?.name || '—'}"`,
+        `"${r.withheldReason || '—'}"`,
       ].join(',');
     });
 
@@ -200,7 +368,7 @@ export function ResultsPage() {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `evalnexa-results-${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute('download', `evalnexa-results-ledger-${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -209,7 +377,7 @@ export function ResultsPage() {
   // Real Export JSON
   const handleExportJSON = () => {
     if (examScopedResults.length === 0) {
-      alert('No finalized result records available for export.');
+      alert('No certified result records available for export.');
       return;
     }
 
@@ -218,6 +386,7 @@ export function ResultsPage() {
       const exam = typeof r.examId === 'object' ? (r.examId as Exam) : null;
       const examiner = typeof r.examinerId === 'object' ? (r.examinerId as User) : null;
       const certifier = typeof r.finalizedBy === 'object' ? (r.finalizedBy as User) : null;
+      const publisher = typeof r.publishedBy === 'object' ? (r.publishedBy as User) : null;
 
       return {
         id: r._id,
@@ -229,35 +398,42 @@ export function ResultsPage() {
         marks: r.totalMarks,
         maximumMarks: r.maximumMarks,
         percentage: r.percentage,
+        grade: r.grade || null,
+        gradePoint: r.gradePoint ?? null,
+        classification: r.classification || null,
         status: r.status,
         finalizedAt: r.finalizedAt || null,
         finalizedBy: certifier?.name || 'Examination Board',
+        publishedAt: r.publishedAt || null,
+        publishedBy: publisher?.name || null,
+        withheldReason: r.withheldReason || null,
       };
     });
 
     const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(payload, null, 2));
     const link = document.createElement('a');
     link.setAttribute('href', dataStr);
-    link.setAttribute('download', `evalnexa-results-${new Date().toISOString().slice(0, 10)}.json`);
+    link.setAttribute('download', `evalnexa-results-ledger-${new Date().toISOString().slice(0, 10)}.json`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
   const isLoading = isLoadingResults || isLoadingBooks || isLoadingEvals;
+  const isAnyCertifiedView = ['CERTIFIED_ALL', 'PUBLISHED', 'FINALIZED', 'WITHHELD'].includes(statusFilter);
 
   return (
     <div>
       {/* Page Header */}
       <div className="page-header">
         <div>
-          <div className="page-header__eyebrow">Control Center · Certification & Publishing</div>
+          <div className="page-header__eyebrow">Control Center · Certification & Ledger Publishing</div>
           <h1 className="page-header__title">Results & Certification</h1>
           <p className="page-header__subtitle">
-            Authoritative certified examination results finalized from the moderation lifecycle. Updates in real time without page reload.
+            Authoritative certified examination results, grade calculations, and institutional ledger publication.
           </p>
         </div>
-        <div className="page-header__actions" style={{ display: 'flex', gap: 'var(--space-3)' }}>
+        <div className="page-header__actions" style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
           <select
             className="form-select"
             style={{ width: 240, fontSize: 'var(--text-body)' }}
@@ -271,6 +447,28 @@ export function ResultsPage() {
               </option>
             ))}
           </select>
+
+          {/* Contextual batch actions for selected exam */}
+          {selectedExamId && finalizedUnpublishedCount > 0 && (
+            <button
+              className="btn btn-primary"
+              onClick={() => publishExamMutation.mutate(selectedExamId)}
+              disabled={publishExamMutation.isPending}
+            >
+              {publishExamMutation.isPending ? 'Publishing...' : `Publish Exam Results (${finalizedUnpublishedCount})`}
+            </button>
+          )}
+
+          {selectedExamId && approvedAwaitingFinalization.length > 0 && (
+            <button
+              className="btn btn-secondary"
+              onClick={() => batchFinalizeMutation.mutate(selectedExamId)}
+              disabled={batchFinalizeMutation.isPending}
+            >
+              {batchFinalizeMutation.isPending ? 'Finalizing...' : `Finalize All Approved (${approvedAwaitingFinalization.length})`}
+            </button>
+          )}
+
           <button className="btn btn-secondary" onClick={handleExportCSV}>
             ↓ Export CSV
           </button>
@@ -283,7 +481,7 @@ export function ResultsPage() {
       {/* Action / Error Alerts */}
       {actionError && (
         <div className="badge-flag" style={{ padding: 'var(--space-3) var(--space-4)', marginBottom: 'var(--space-4)', display: 'flex', justifyContent: 'space-between' }}>
-          <span><strong>Finalization Notice:</strong> {actionError}</span>
+          <span><strong>Notice:</strong> {actionError}</span>
           <button style={{ background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700 }} onClick={() => setActionError(null)}>✕</button>
         </div>
       )}
@@ -294,7 +492,7 @@ export function ResultsPage() {
         </div>
       )}
 
-      {/* FINAL RESULT PIPELINE (Evaluated, Pending Moderation, Approved, Finalized) */}
+      {/* FINAL RESULT PIPELINE METRICS */}
       <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 'var(--space-6)' }}>
         <div className="stat-card">
           <div className="stat-card__eyebrow">EVALUATED</div>
@@ -311,7 +509,7 @@ export function ResultsPage() {
         </div>
 
         <div className="stat-card">
-          <div className="stat-card__eyebrow">APPROVED</div>
+          <div className="stat-card__eyebrow">APPROVED (READY)</div>
           <div className="stat-card__value" style={{ color: 'var(--status-approved-text)' }}>
             {approvedCount}
           </div>
@@ -319,11 +517,13 @@ export function ResultsPage() {
         </div>
 
         <div className="stat-card">
-          <div className="stat-card__eyebrow">FINALIZED</div>
+          <div className="stat-card__eyebrow">CERTIFIED LEDGER</div>
           <div className="stat-card__value" style={{ color: 'var(--parchment-navy)' }}>
-            {finalizedCount}
+            {publishedCount} <span style={{ fontSize: 'var(--text-table)', color: 'var(--text-muted)' }}>/ {finalizedCount}</span>
           </div>
-          <div className="stat-card__sub">Certified result register</div>
+          <div className="stat-card__sub">
+            {publishedCount} published · {withheldCount} withheld
+          </div>
         </div>
       </div>
 
@@ -332,15 +532,21 @@ export function ResultsPage() {
         <div className="folio-card__header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
             <span className="folio-card__title">
-              {statusFilter === 'FINALIZED'
-                ? `Certified Result Register (${examScopedResults.length})`
+              {statusFilter === 'CERTIFIED_ALL'
+                ? `Certified Result Register (${displayResults.length})`
+                : statusFilter === 'PUBLISHED'
+                ? `Published Examination Results (${displayResults.length})`
+                : statusFilter === 'FINALIZED'
+                ? `Certified Unpublished Results (${displayResults.length})`
+                : statusFilter === 'WITHHELD'
+                ? `Withheld Examination Results (${displayResults.length})`
                 : statusFilter === 'AWAITING_FINALIZATION'
                 ? `Approved Scripts Awaiting Finalization (${approvedAwaitingFinalization.length})`
-                : `Lifecycle Register`}
+                : `Examination Lifecycle Register`}
             </span>
             <div className="label-mono" style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>
-              {statusFilter === 'FINALIZED'
-                ? 'Official results computed, verified, and sealed by the backend certification service'
+              {isAnyCertifiedView
+                ? 'Official results computed, graded, and sealed in the authoritative institutional ledger'
                 : 'Audited records moving through the institutional examination pipeline'}
             </div>
           </div>
@@ -353,8 +559,11 @@ export function ResultsPage() {
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
             >
-              <option value="FINALIZED">Finalized / Certified Results</option>
-              <option value="AWAITING_FINALIZATION">Approved (Ready to Finalize)</option>
+              <option value="CERTIFIED_ALL">All Certified Results ({examScopedResults.length})</option>
+              <option value="PUBLISHED">Published on Ledger ({publishedCount})</option>
+              <option value="FINALIZED">Certified / Unpublished ({finalizedUnpublishedCount})</option>
+              <option value="WITHHELD">Withheld by Board ({withheldCount})</option>
+              <option value="AWAITING_FINALIZATION">Approved (Ready to Finalize) ({approvedAwaitingFinalization.length})</option>
               <option value="PENDING_MODERATION">Pending Moderation Review</option>
               <option value="ALL">All Evaluated Records</option>
             </select>
@@ -364,14 +573,14 @@ export function ResultsPage() {
         <div className="folio-card__body" style={{ padding: 0 }}>
           {isLoading ? (
             <div className="state-container"><div className="spinner" /></div>
-          ) : statusFilter === 'FINALIZED' ? (
+          ) : isAnyCertifiedView ? (
             /* CERTIFIED RESULTS VIEW */
-            examScopedResults.length === 0 ? (
+            displayResults.length === 0 ? (
               <div className="state-container" style={{ padding: 'var(--space-10)' }}>
                 <div className="state-icon">🏛</div>
-                <div className="state-title">No Certified Results Yet</div>
+                <div className="state-title">No Records Found</div>
                 <div className="state-body">
-                  Official marks will appear here once approved evaluations are finalized into the university result register.
+                  No certified results match the current status filter.
                   {approvedAwaitingFinalization.length > 0 && (
                     <div style={{ marginTop: 'var(--space-4)' }}>
                       <button
@@ -393,14 +602,15 @@ export function ResultsPage() {
                       <th>Script</th>
                       <th>Exam</th>
                       <th>Marks</th>
-                      <th>Maximum</th>
-                      <th>Percentage</th>
+                      <th>Grade & GP</th>
+                      <th>Classification</th>
                       <th>Status</th>
-                      <th>Certified Date</th>
+                      <th>Publication Date</th>
+                      <th style={{ textAlign: 'right' }}>Ledger Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {examScopedResults.map((r) => {
+                    {displayResults.map((r) => {
                       const ab = typeof r.answerBookId === 'object' ? (r.answerBookId as AnswerBook) : null;
                       const exam = typeof r.examId === 'object' ? (r.examId as Exam) : null;
 
@@ -427,25 +637,102 @@ export function ResultsPage() {
                             )}
                           </td>
                           <td>
-                            <span style={{ fontSize: 'var(--text-body)', fontWeight: 700, color: 'var(--text-primary)' }}>
-                              {r.totalMarks}
-                            </span>
-                          </td>
-                          <td>
-                            <span className="label-mono" style={{ fontSize: 'var(--text-table)', color: 'var(--text-muted)' }}>
-                              {r.maximumMarks}
-                            </span>
-                          </td>
-                          <td>
-                            <span className="label-mono" style={{ fontSize: 'var(--text-table)', fontWeight: 600, color: 'var(--parchment-navy)' }}>
+                            <div>
+                              <span style={{ fontSize: 'var(--text-body)', fontWeight: 700, color: 'var(--text-primary)' }}>
+                                {r.totalMarks}
+                              </span>
+                              <span className="label-mono" style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>
+                                {' '}/ {r.maximumMarks}
+                              </span>
+                            </div>
+                            <div className="label-mono" style={{ fontSize: 'var(--text-metadata)', fontWeight: 600, color: 'var(--parchment-navy)' }}>
                               {r.percentage}%
+                            </div>
+                          </td>
+                          <td>
+                            <span
+                              className="label-mono"
+                              style={{
+                                fontSize: 'var(--text-table)',
+                                fontWeight: 700,
+                                color: r.grade === 'F' ? 'var(--burgundy)' : 'var(--text-primary)',
+                              }}
+                            >
+                              {r.grade || '—'} {r.gradePoint !== undefined ? `(${r.gradePoint})` : ''}
+                            </span>
+                          </td>
+                          <td>
+                            <span
+                              style={{
+                                fontSize: 'var(--text-metadata)',
+                                fontWeight: 500,
+                                color: r.classification === 'FAIL' ? 'var(--burgundy)' : 'var(--text-secondary)',
+                              }}
+                            >
+                              {formatClassification(r.classification)}
                             </span>
                           </td>
                           <td>
                             <StatusBadge status={r.status} />
+                            {r.status === 'WITHHELD' && r.withheldReason && (
+                              <div
+                                style={{
+                                  fontSize: '11px',
+                                  color: 'var(--burgundy)',
+                                  marginTop: 'var(--space-1)',
+                                  maxWidth: 200,
+                                  whiteSpace: 'normal',
+                                  wordBreak: 'break-word',
+                                }}
+                              >
+                                <em>Reason: {r.withheldReason}</em>
+                              </div>
+                            )}
                           </td>
                           <td className="label-mono" style={{ fontSize: 'var(--text-metadata)' }}>
-                            {r.finalizedAt ? new Date(r.finalizedAt).toLocaleString() : '—'}
+                            {r.publishedAt
+                              ? new Date(r.publishedAt).toLocaleString()
+                              : r.finalizedAt
+                              ? `Finalized: ${new Date(r.finalizedAt).toLocaleDateString()}`
+                              : '—'}
+                          </td>
+                          <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                            <div style={{ display: 'inline-flex', gap: 'var(--space-2)' }}>
+                              {r.status === 'FINALIZED' && (
+                                <button
+                                  className="btn btn-primary btn-sm"
+                                  onClick={() => publishMutation.mutate(r._id)}
+                                  disabled={publishMutation.isPending}
+                                  title="Publish certified result to institutional ledger"
+                                >
+                                  {publishMutation.isPending ? 'Publishing...' : 'Publish'}
+                                </button>
+                              )}
+                              {r.status === 'PUBLISHED' && (
+                                <button
+                                  className="btn btn-secondary btn-sm"
+                                  style={{ color: 'var(--burgundy)', borderColor: 'rgba(92, 29, 36, 0.4)' }}
+                                  onClick={() => {
+                                    setWithholdModalResultId(r._id);
+                                    setWithholdReasonInput('');
+                                  }}
+                                  title="Flag result as withheld with administrative rationale"
+                                >
+                                  Withhold
+                                </button>
+                              )}
+                              {r.status === 'WITHHELD' && (
+                                <button
+                                  className="btn btn-secondary btn-sm"
+                                  style={{ color: '#2D6A4F', borderColor: 'rgba(45, 106, 79, 0.4)' }}
+                                  onClick={() => releaseMutation.mutate(r._id)}
+                                  disabled={releaseMutation.isPending}
+                                  title="Release from withheld status back to active register"
+                                >
+                                  {releaseMutation.isPending ? 'Releasing...' : 'Release'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -615,6 +902,61 @@ export function ResultsPage() {
           )}
         </div>
       </div>
+
+      {/* WITHHOLD MODAL */}
+      {withholdModalResultId && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => e.target === e.currentTarget && setWithholdModalResultId(null)}
+        >
+          <div className="modal" style={{ maxWidth: 540 }}>
+            <div className="modal__header">
+              <div>
+                <div className="modal__eyebrow">Academic Governance · Administrative Action</div>
+                <div className="modal__title">Withhold Certified Examination Result</div>
+              </div>
+              <button className="modal__close" onClick={() => setWithholdModalResultId(null)}>✕</button>
+            </div>
+            <div className="modal__body">
+              <p style={{ fontSize: 'var(--text-table)', color: 'var(--text-secondary)', marginBottom: 'var(--space-4)' }}>
+                Please specify the authoritative governance rationale for withholding this result from public dissemination. This justification will be immutably recorded in the institutional audit ledger.
+              </p>
+              <div className="form-group">
+                <label className="form-label" htmlFor="withhold-reason">
+                  Withholding Rationale *
+                </label>
+                <textarea
+                  id="withhold-reason"
+                  className="form-textarea"
+                  rows={4}
+                  placeholder="e.g. Identity verification discrepancy flagged by academic board..."
+                  value={withholdReasonInput}
+                  onChange={(e) => setWithholdReasonInput(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="modal__footer">
+              <button className="btn btn-secondary" onClick={() => setWithholdModalResultId(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                disabled={!withholdReasonInput.trim() || withholdMutation.isPending}
+                onClick={() => {
+                  if (withholdModalResultId && withholdReasonInput.trim()) {
+                    withholdMutation.mutate({
+                      resultId: withholdModalResultId,
+                      reason: withholdReasonInput.trim(),
+                    });
+                  }
+                }}
+              >
+                {withholdMutation.isPending ? 'Withholding...' : 'Confirm Withhold'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
