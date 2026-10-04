@@ -42,6 +42,8 @@ if ROOT_DIR not in sys.path:
 # ---------------------------------------------------------------------------
 P3_PATH = os.path.join(ROOT_DIR, "phase3", "06_scanner_integration_investigation.py")
 spec_p3 = importlib.util.spec_from_file_location("phase3_06", P3_PATH)
+if spec_p3 is None or spec_p3.loader is None:
+    raise ImportError(f"Could not load module from {P3_PATH}")
 phase3_06 = importlib.util.module_from_spec(spec_p3)
 spec_p3.loader.exec_module(phase3_06)
 integrate_production_scanner = phase3_06.integrate_production_scanner
@@ -236,6 +238,8 @@ def run_contrast_validation():
 
     # 3. Execute shadow normalization to produce SafeState 1
     shadow_op = registry_c.get_operator("SHADOW_NORMALIZATION")
+    assert first_planned is not None
+    assert shadow_op is not None
     state_c1, rec_shadow = engine_c.execute_and_verify(state_c0, first_planned, shadow_op, verifier_c)
     shadow_accepted = (rec_shadow.verification_evidence.verdict == VerificationVerdict.PASS and state_c1.version_index == 1)
 
@@ -329,6 +333,7 @@ def run_contrast_validation():
         returned_state_d.state_id == "state_v0_raw" and
         np.array_equal(returned_state_d.image_gray, initial_gray_d)
     )
+    assert isinstance(record_d, RejectedCorrectionRecord)
     record_test(
         "D", "Controlled Contrast Rejection & Rollback", test_d_pass,
         f"Verdict={record_d.verification_evidence.verdict}, "

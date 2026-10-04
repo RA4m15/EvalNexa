@@ -53,6 +53,8 @@ if ROOT_DIR not in sys.path:
 # Phase 3 Scanner Integration (Frozen)
 P3_PATH = os.path.join(ROOT_DIR, "phase3", "06_scanner_integration_investigation.py")
 spec_p3 = importlib.util.spec_from_file_location("phase3_06", P3_PATH)
+if spec_p3 is None or spec_p3.loader is None:
+    raise ImportError(f"Could not load module from {P3_PATH}")
 phase3_06 = importlib.util.module_from_spec(spec_p3)
 spec_p3.loader.exec_module(phase3_06)
 integrate_production_scanner = phase3_06.integrate_production_scanner

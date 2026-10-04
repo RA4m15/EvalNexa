@@ -92,8 +92,8 @@ def analyze_canvas_orientation(
     )
 
     # 2. Projection profiles
-    h_proj = np.sum(bin_fg, axis=1, dtype=np.float64) / 255.0
-    v_proj = np.sum(bin_fg, axis=0, dtype=np.float64) / 255.0
+    h_proj = np.asarray(np.sum(bin_fg, axis=1, dtype=np.float64) / 255.0)
+    v_proj = np.asarray(np.sum(bin_fg, axis=0, dtype=np.float64) / 255.0)
 
     h_var = float(np.var(h_proj))
     v_var = float(np.var(v_proj))

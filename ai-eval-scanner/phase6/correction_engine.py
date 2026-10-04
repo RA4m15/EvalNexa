@@ -241,7 +241,8 @@ class ProductionVerificationGate(CorrectionVerificationGate):
 
         sobel_ref = np.hypot(cv2.Sobel(ref_gray, cv2.CV_32F, 1, 0), cv2.Sobel(ref_gray, cv2.CV_32F, 0, 1))
         sobel_cand = np.hypot(cv2.Sobel(cand_gray, cv2.CV_32F, 1, 0), cv2.Sobel(cand_gray, cv2.CV_32F, 0, 1))
-        paper_near_strokes = cv2.dilate(ref_bin, np.ones((5, 5), np.uint8)) ^ ref_bin
+        dilated_ref = cv2.dilate(ref_bin, np.ones((5, 5), np.uint8))
+        paper_near_strokes = cv2.bitwise_xor(dilated_ref, ref_bin)
 
         # For linear contrast expansion, baseline gradient legitimately scales with dynamic range expansion factor k.
         # True ringing / halo overshoot is gradient surge beyond linear contrast scaling.

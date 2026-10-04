@@ -50,6 +50,8 @@ if ROOT_DIR not in sys.path:
 # Phase 3 Scanner Integration
 P3_PATH = os.path.join(ROOT_DIR, "phase3", "06_scanner_integration_investigation.py")
 spec_p3 = importlib.util.spec_from_file_location("phase3_06", P3_PATH)
+if spec_p3 is None or spec_p3.loader is None:
+    raise ImportError(f"Could not load module from {P3_PATH}")
 phase3_06 = importlib.util.module_from_spec(spec_p3)
 spec_p3.loader.exec_module(phase3_06)
 integrate_production_scanner = phase3_06.integrate_production_scanner
@@ -368,12 +370,16 @@ def run_phase7_2_validation():
     print("\n--- Test M: Phase 6 Production Regression Suite ---")
     p6_3_path = os.path.join(ROOT_DIR, "phase6", "run_phase6_3_engine_validation.py")
     spec_6_3 = importlib.util.spec_from_file_location("val_6_3", p6_3_path)
+    if spec_6_3 is None or spec_6_3.loader is None:
+        raise ImportError(f"Could not load module from {p6_3_path}")
     val_6_3 = importlib.util.module_from_spec(spec_6_3)
     spec_6_3.loader.exec_module(val_6_3)
     p6_3_passed = val_6_3.run_engine_validation()
 
     p6_5_path = os.path.join(ROOT_DIR, "phase6", "run_phase6_5_contrast_validation.py")
     spec_6_5 = importlib.util.spec_from_file_location("val_6_5", p6_5_path)
+    if spec_6_5 is None or spec_6_5.loader is None:
+        raise ImportError(f"Could not load module from {p6_5_path}")
     val_6_5 = importlib.util.module_from_spec(spec_6_5)
     spec_6_5.loader.exec_module(val_6_5)
     p6_5_passed = val_6_5.run_contrast_validation()

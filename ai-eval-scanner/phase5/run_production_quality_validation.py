@@ -35,18 +35,24 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 P3_PATH = os.path.join(ROOT_DIR, "phase3", "06_scanner_integration_investigation.py")
 spec_p3 = importlib.util.spec_from_file_location("phase3_06", P3_PATH)
+if spec_p3 is None or spec_p3.loader is None:
+    raise ImportError(f"Could not load module from {P3_PATH}")
 phase3_06 = importlib.util.module_from_spec(spec_p3)
 spec_p3.loader.exec_module(phase3_06)
 integrate_production_scanner = phase3_06.integrate_production_scanner
 
 P4_PATH = os.path.join(ROOT_DIR, "phase4", "production_enhancement.py")
 spec_p4 = importlib.util.spec_from_file_location("phase4_prod", P4_PATH)
+if spec_p4 is None or spec_p4.loader is None:
+    raise ImportError(f"Could not load module from {P4_PATH}")
 phase4_prod = importlib.util.module_from_spec(spec_p4)
 spec_p4.loader.exec_module(phase4_prod)
 enhance_scanned_document = phase4_prod.enhance_scanned_document
 
 P5_PATH = os.path.join(ROOT_DIR, "phase5", "production_quality_assessment.py")
 spec_p5 = importlib.util.spec_from_file_location("phase5_prod", P5_PATH)
+if spec_p5 is None or spec_p5.loader is None:
+    raise ImportError(f"Could not load module from {P5_PATH}")
 phase5_prod = importlib.util.module_from_spec(spec_p5)
 spec_p5.loader.exec_module(phase5_prod)
 assess_document_quality = phase5_prod.assess_document_quality

@@ -52,6 +52,8 @@ if not os.path.exists(PHASE2_07_PATH):
     raise FileNotFoundError(f"Required frozen module not found: {PHASE2_07_PATH}")
 
 spec = importlib.util.spec_from_file_location("phase2_07", PHASE2_07_PATH)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Cannot load frozen phase2_07 module from {PHASE2_07_PATH}")
 phase2_07 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(phase2_07)
 

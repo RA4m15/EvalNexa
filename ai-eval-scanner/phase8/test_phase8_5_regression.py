@@ -36,6 +36,8 @@ if ROOT_DIR not in sys.path:
 # Dynamically import 04_representation_evaluation_investigation.py
 p85_path = os.path.join(CURRENT_DIR, "04_representation_evaluation_investigation.py")
 spec = importlib.util.spec_from_file_location("p85_investigation", p85_path)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Could not load module from {p85_path}")
 p85 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(p85)
 

@@ -35,6 +35,8 @@ if ROOT_DIR not in sys.path:
 import importlib.util
 p9_path = os.path.join(CURRENT_DIR, "01_human_review_boundary_investigation.py")
 spec = importlib.util.spec_from_file_location("p9_investigation", p9_path)
+if spec is None or spec.loader is None:
+    raise ImportError(f"Could not load module from {p9_path}")
 p9 = importlib.util.module_from_spec(spec)
 sys.modules["p9_investigation"] = p9
 spec.loader.exec_module(p9)

@@ -194,6 +194,8 @@ class ProductionRescanDecisionEngine:
             final_safe_gray = document_input.final_safe_state.image_gray
             qa_final = document_input.quality_assessment_final
             qa_initial = document_input.quality_assessment_initial
+            if qa_final is None:
+                qa_final = qa_initial
             rollbacks_count = len(document_input.rollback_events)
             is_rollback_present = rollbacks_count > 0
             applied_ops = [c.operator_id for c in document_input.applied_corrections]

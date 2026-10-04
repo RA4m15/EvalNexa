@@ -38,6 +38,8 @@ if ROOT_DIR not in sys.path:
 # ---------------------------------------------------------------------------
 P3_PATH = os.path.join(ROOT_DIR, "phase3", "06_scanner_integration_investigation.py")
 spec_p3 = importlib.util.spec_from_file_location("phase3_06", P3_PATH)
+if spec_p3 is None or spec_p3.loader is None:
+    raise ImportError(f"Cannot load frozen phase3_06 module from {P3_PATH}")
 phase3_06 = importlib.util.module_from_spec(spec_p3)
 spec_p3.loader.exec_module(phase3_06)
 integrate_production_scanner = phase3_06.integrate_production_scanner
@@ -207,8 +209,8 @@ def run_engine_validation():
         verifier=verifier_c
     )
 
+    assert isinstance(record_c, RejectedCorrectionRecord)
     test_c_pass = (
-        isinstance(record_c, RejectedCorrectionRecord) and
         record_c.verification_evidence.verdict == VerificationVerdict.FAIL and
         returned_state_c.version_index == 0 and
         returned_state_c.state_id == "state_v0_raw" and

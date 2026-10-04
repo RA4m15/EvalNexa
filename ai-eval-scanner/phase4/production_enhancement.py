@@ -399,7 +399,8 @@ def verify_operator_safety(
     sobel_cand = np.hypot(cv2.Sobel(candidate_gray, cv2.CV_32F, 1, 0), cv2.Sobel(candidate_gray, cv2.CV_32F, 0, 1))
 
     # Evaluate gradient surge on paper background adjacent to strokes
-    paper_near_strokes = cv2.dilate(ref_bin, np.ones((5, 5), np.uint8)) ^ ref_bin
+    dilated_ref = cv2.dilate(ref_bin, np.ones((5, 5), np.uint8))
+    paper_near_strokes = cv2.bitwise_xor(dilated_ref, ref_bin)
     if np.count_nonzero(paper_near_strokes) > 50:
         halo_gain = float(np.mean(sobel_cand[paper_near_strokes > 0]) - np.mean(sobel_ref[paper_near_strokes > 0]))
     else:
