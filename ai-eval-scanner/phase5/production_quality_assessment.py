@@ -224,7 +224,8 @@ class QualityAssessmentResult:
 def extract_curated_quality_profile(
     image: np.ndarray,
     image_name: str = "document_image",
-    config: Optional[QualityGateConfig] = None
+    config: Optional[QualityGateConfig] = None,
+    document_box: Optional[Tuple[int, int, int, int]] = None,
 ) -> QualityEvidenceProfile:
     """
     Extracts the curated multi-dimensional quality evidence profile from an image.
@@ -344,14 +345,87 @@ def extract_curated_quality_profile(
         n_cc_clip, labels_clip, stats_clip, _ = cv2.connectedComponentsWithStats(otsu_clean)
         char_clipping_pixels = 0
         for i in range(1, n_cc_clip):
-            area = stats_clip[i, cv2.CC_STAT_AREA]
-            cw_comp = stats_clip[i, cv2.CC_STAT_WIDTH]
-            ch_comp = stats_clip[i, cv2.CC_STAT_HEIGHT]
+            area      = stats_clip[i, cv2.CC_STAT_AREA]
+            cw_comp   = stats_clip[i, cv2.CC_STAT_WIDTH]
+            ch_comp   = stats_clip[i, cv2.CC_STAT_HEIGHT]
+            bx        = stats_clip[i, cv2.CC_STAT_LEFT]
+            by        = stats_clip[i, cv2.CC_STAT_TOP]
             comp_mask = (labels_clip == i)
-            if np.any(comp_mask & band):
-                # Filter page borders: character glyphs have bounded width/height
-                if cw_comp < (w * 0.35) and ch_comp < (h * 0.35) and area > 10:
-                    char_clipping_pixels += area
+
+            # Must touch the inspection band at all
+            if not np.any(comp_mask & band):
+                continue
+
+            # Standard glyph-size filter: exclude page-wide borders and pixel noise
+            if not (cw_comp < (w * 0.35) and ch_comp < (h * 0.35) and area > 10):
+                continue
+
+            ar      = float(cw_comp) / max(1, ch_comp)
+            min_dim = min(cw_comp, ch_comp)
+
+            # Strategy 2A — large flat shadow / background band:
+            #   reject if aspect ratio is extreme AND component is too large to be a glyph.
+            if ar >= 5.0 and area > 1000:
+                continue
+
+            # Strategy 2B — thin structural ruling / border line:
+            #   reject if aspect ratio is extreme AND the component is a thin stroke.
+            if (ar >= 5.0 or ar <= 0.30) and min_dim <= 5:
+                continue
+
+            # Determine which boundary edges the component touches in otsu_clean
+            touches_top   = by <= 2            and np.any(comp_mask[2:4,  :])
+            touches_bot   = (by + ch_comp) >= (h - 2) and np.any(comp_mask[-4:-2, :])
+            touches_left  = bx <= 2            and np.any(comp_mask[:,  2:4])
+            touches_right = (bx + cw_comp) >= (w - 2) and np.any(comp_mask[:, -4:-2])
+
+            # Strategy 1 — True boundary intersection:
+            #   A component is counted only when its ink actually reaches the real image
+            #   boundary (row/col 0-1 of otsu_bin, BEFORE the 2-px mask was applied).
+            #   For top-touching components we additionally require the component to be
+            #   short (a "sliver"), because Phase 3 deskew rotation can push full-height
+            #   characters into row 0 without genuinely clipping them.
+            reaches_boundary = False
+
+            if touches_top:
+                # Only count components that look like clipping slivers, not full
+                # characters that were merely rotated into the boundary by deskewing.
+                sliver_height_limit = max(12, int(h * 0.012))
+                if ch_comp <= sliver_height_limit:
+                    cols = np.where(np.any(comp_mask[2:4, :], axis=0))[0]
+                    if cols.size > 0:
+                        c0 = max(0, int(cols.min()) - 1)
+                        c1 = min(w, int(cols.max()) + 2)
+                        if np.any(otsu_bin[:2, c0:c1] > 0):
+                            reaches_boundary = True
+
+            if touches_bot:
+                cols = np.where(np.any(comp_mask[-4:-2, :], axis=0))[0]
+                if cols.size > 0:
+                    c0 = max(0, int(cols.min()) - 1)
+                    c1 = min(w, int(cols.max()) + 2)
+                    if np.any(otsu_bin[-2:, c0:c1] > 0):
+                        reaches_boundary = True
+
+            if touches_left:
+                rows = np.where(np.any(comp_mask[:, 2:4], axis=1))[0]
+                if rows.size > 0:
+                    r0 = max(0, int(rows.min()) - 1)
+                    r1 = min(h, int(rows.max()) + 2)
+                    if np.any(otsu_bin[r0:r1, :2] > 0):
+                        reaches_boundary = True
+
+            if touches_right:
+                rows = np.where(np.any(comp_mask[:, -4:-2], axis=1))[0]
+                if rows.size > 0:
+                    r0 = max(0, int(rows.min()) - 1)
+                    r1 = min(h, int(rows.max()) + 2)
+                    if np.any(otsu_bin[r0:r1, -2:] > 0):
+                        reaches_boundary = True
+
+            if reaches_boundary:
+                char_clipping_pixels += area
+
         boundary_touches = char_clipping_pixels
 
     y_ink, x_ink = np.where(otsu_bin > 0)
@@ -365,13 +439,37 @@ def extract_curated_quality_profile(
         margin_clearance = float(min(h, w))
 
     # Dimension 6: Obstruction & Foreign Intrusion Evidence
-    margin_w = max(5, int(round(w * 0.05)))
-    margin_h = max(5, int(round(h * 0.05)))
-    perimeter_mask = np.zeros((h, w), dtype=bool)
-    perimeter_mask[:margin_h, :] = True
-    perimeter_mask[-margin_h:, :] = True
-    perimeter_mask[:, :margin_w] = True
-    perimeter_mask[:, -margin_w:] = True
+    # Use verified document geometry when available (e.g. DESKEWED_FRAME_LIMITED)
+    has_valid_box = False
+    bx, by, bw, bh = 0, 0, 0, 0
+    if document_box is not None and len(document_box) == 4:
+        cand_bx, cand_by, cand_bw, cand_bh = document_box
+        cand_bx = max(0, min(w - 1, int(cand_bx)))
+        cand_by = max(0, min(h - 1, int(cand_by)))
+        cand_bw = max(10, min(w - cand_bx, int(cand_bw)))
+        cand_bh = max(10, min(h - cand_by, int(cand_bh)))
+        if cand_bw >= 50 and cand_bh >= 50:
+            bx, by, bw, bh = cand_bx, cand_by, cand_bw, cand_bh
+            has_valid_box = True
+
+    if has_valid_box:
+        # Document-relative perimeter band
+        margin_w = max(5, int(round(bw * 0.05)))
+        margin_h = max(5, int(round(bh * 0.05)))
+        perimeter_mask = np.zeros((h, w), dtype=bool)
+        perimeter_mask[by : by + margin_h, bx : bx + bw] = True
+        perimeter_mask[by + bh - margin_h : by + bh, bx : bx + bw] = True
+        perimeter_mask[by : by + bh, bx : bx + margin_w] = True
+        perimeter_mask[by : by + bh, bx + bw - margin_w : bx + bw] = True
+    else:
+        # Full canvas perimeter band
+        margin_w = max(5, int(round(w * 0.05)))
+        margin_h = max(5, int(round(h * 0.05)))
+        perimeter_mask = np.zeros((h, w), dtype=bool)
+        perimeter_mask[:margin_h, :] = True
+        perimeter_mask[-margin_h:, :] = True
+        perimeter_mask[:, :margin_w] = True
+        perimeter_mask[:, -margin_w:] = True
 
     if hsv is not None:
         high_sat_margin = (hsv[:, :, 1] > 60) & perimeter_mask
@@ -466,7 +564,8 @@ def extract_curated_quality_profile(
 
 def evaluate_tier1_fatal_defects(
     profile: QualityEvidenceProfile,
-    config: QualityGateConfig
+    config: QualityGateConfig,
+    geometry_reliable: bool = True,
 ) -> List[FatalDefectRecord]:
     """
     Evaluates non-compensatory Tier 1 Boolean Veto Filters.
@@ -554,18 +653,19 @@ def evaluate_tier1_fatal_defects(
 
     # 5. Destructive Foreign Object Occlusion
     if profile.margin_occlusion_fraction > config.fatal_margin_occlusion_ratio:
-        fatal_records.append(
-            FatalDefectRecord(
-                defect_code="FATAL_MARGIN_OCCLUSION",
-                evidence_dimension="margin_occlusion_fraction",
-                measured_value=profile.margin_occlusion_fraction,
-                threshold_value=config.fatal_margin_occlusion_ratio,
-                rationale=(
-                    f"Intrusive foreign object covers {profile.margin_occlusion_fraction*100:.1f}% of margin perimeter. "
-                    "Obstructs critical document boundary content."
+        if geometry_reliable:
+            fatal_records.append(
+                FatalDefectRecord(
+                    defect_code="FATAL_MARGIN_OCCLUSION",
+                    evidence_dimension="margin_occlusion_fraction",
+                    measured_value=profile.margin_occlusion_fraction,
+                    threshold_value=config.fatal_margin_occlusion_ratio,
+                    rationale=(
+                        f"Intrusive foreign object covers {profile.margin_occlusion_fraction*100:.1f}% of margin perimeter. "
+                        "Obstructs critical document boundary content."
+                    )
                 )
             )
-        )
 
     # 6. Geometric Aspect Ratio Collapse
     if is_full_doc and profile.aspect_ratio_a4_deviation > config.fatal_aspect_ratio_deviation:
@@ -592,7 +692,9 @@ def evaluate_tier1_fatal_defects(
 def assess_document_quality(
     document_input: Union[np.ndarray, Any],
     image_name: str = "document_image",
-    config: Optional[QualityGateConfig] = None
+    config: Optional[QualityGateConfig] = None,
+    document_box: Optional[Tuple[int, int, int, int]] = None,
+    scanner_status: Optional[str] = None,
 ) -> QualityAssessmentResult:
     """
     Main Production Entry Point for Smart Quality Assessment.
@@ -624,17 +726,38 @@ def assess_document_quality(
         eval_image = document_input.scanned_image
         source_metadata["pipeline_stage"] = "PHASE3_RECTIFIED"
         source_metadata["scanner_status"] = getattr(document_input, "status", "UNKNOWN")
+        if scanner_status is None:
+            scanner_status = getattr(document_input, "status", None)
+        if document_box is None and hasattr(document_input, "framing_metadata"):
+            fm = getattr(document_input, "framing_metadata") or {}
+            document_box = fm.get("selected_box")
     elif isinstance(document_input, np.ndarray):
         eval_image = document_input
         source_metadata["pipeline_stage"] = "DIRECT_IMAGE"
     else:
         raise TypeError(f"Unsupported document_input type: {type(document_input)}")
 
+    if scanner_status:
+        source_metadata["scanner_status"] = scanner_status
+    if document_box:
+        source_metadata["document_box"] = document_box
+
+    # Geometry reliability check:
+    # If scanner status is DESKEWED_FRAME_LIMITED but no reliable document_box was provided,
+    # geometry is unconfirmed/ambiguous.
+    geometry_reliable = True
+    if scanner_status == "DESKEWED_FRAME_LIMITED" and document_box is None:
+        geometry_reliable = False
+
     # 1. Tier 2 Evidence Profile Extraction
-    profile = extract_curated_quality_profile(eval_image, image_name=image_name, config=config)
+    profile = extract_curated_quality_profile(
+        eval_image, image_name=image_name, config=config, document_box=document_box
+    )
 
     # 2. Tier 1 Fatal Defect Veto Evaluation
-    fatal_defects = evaluate_tier1_fatal_defects(profile, config=config)
+    fatal_defects = evaluate_tier1_fatal_defects(
+        profile, config=config, geometry_reliable=geometry_reliable
+    )
 
     # 3. Non-Compensatory Veto Handler
     if fatal_defects:
@@ -711,6 +834,13 @@ def assess_document_quality(
             f"Low Character Resolution: Median glyph height ({profile.median_character_height_px:.1f} px) "
             "approaches minimum line OCR threshold."
         )
+
+    # Ambiguous Margin Occlusion (Geometry Unconfirmed)
+    if not geometry_reliable and profile.margin_occlusion_fraction > config.fatal_margin_occlusion_ratio:
+        risk_factors.append(
+            f"Ambiguous margin occlusion: {profile.margin_occlusion_fraction*100:.1f}% without confirmed document boundary."
+        )
+        notes.append("WARNING: Margin occlusion detected but document geometry is unconfirmed. Routing to human review.")
 
     # 5. Distinction: Enhancement Potential vs Evaluation Readiness
     if is_shadowed and source_metadata.get("pipeline_stage") != "PHASE4_ENHANCED":
