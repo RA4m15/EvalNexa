@@ -18,6 +18,7 @@ interface CapturedPageItem {
   blob: Blob;
   qualityStatus: 'PASSED' | 'RESCAN_REQUIRED';
   diagnostics?: PageQualityDiagnostics;
+  processedImageUrl?: string;
 }
 
 export function ScanCenterPage() {
@@ -47,6 +48,7 @@ export function ScanCenterPage() {
     qualityStatus: 'PASSED' | 'RESCAN_REQUIRED';
     diagnostics?: PageQualityDiagnostics;
     serviceUnavailableNotice?: string;
+    processedImageUrl?: string;
   } | null>(null);
 
   // Accepted pages list
@@ -184,7 +186,7 @@ export function ScanCenterPage() {
           return;
         }
 
-        const previewUrl = URL.createObjectURL(blob);
+        const rawPreviewUrl = URL.createObjectURL(blob);
         const nextPgNum = acceptedPages.length + 1;
 
         // 1. Real client-side Laplacian variance & contour analysis
@@ -192,6 +194,10 @@ export function ScanCenterPage() {
 
         // 2. Call external OpenCV scanning engine if connected
         let finalDiagnostics: PageQualityDiagnostics = canvasDiagnostics;
+        let finalBlob: Blob = blob;
+        let finalPreviewUrl: string = rawPreviewUrl;
+        let processedImageUrl: string | undefined = undefined;
+
         try {
           const procResult = await processPageWithOpenCVService(blob, {
             examId: selectedExamId,
@@ -201,16 +207,27 @@ export function ScanCenterPage() {
           if (procResult.serviceAvailable && procResult.diagnostics) {
             finalDiagnostics = procResult.diagnostics;
           }
+          if (procResult.processedBlob) {
+            finalBlob = procResult.processedBlob;
+            if (procResult.processedImageUrl) {
+              URL.revokeObjectURL(rawPreviewUrl);
+              finalPreviewUrl = procResult.processedImageUrl;
+              processedImageUrl = procResult.processedImageUrl;
+            }
+          } else if (procResult.processedImageUrl) {
+            processedImageUrl = procResult.processedImageUrl;
+          }
         } catch {
-          // Keep real canvas diagnostics
+          // Keep real canvas diagnostics and raw blob fallback
         }
 
         setCurrentPendingPage({
           pageNumber: nextPgNum,
-          previewUrl,
-          blob,
+          previewUrl: finalPreviewUrl,
+          blob: finalBlob,
           qualityStatus: finalDiagnostics.status === 'RESCAN_REQUIRED' ? 'RESCAN_REQUIRED' : 'PASSED',
           diagnostics: finalDiagnostics,
+          processedImageUrl,
         });
 
         setStep(3); // Go to Step 3: Quality check
@@ -228,7 +245,7 @@ export function ScanCenterPage() {
     if (!file) return;
 
     setIsProcessingFrame(true);
-    const previewUrl = URL.createObjectURL(file);
+    const rawPreviewUrl = URL.createObjectURL(file);
     const nextPgNum = acceptedPages.length + 1;
 
     const procResult = await processPageWithOpenCVService(file, {
@@ -238,21 +255,35 @@ export function ScanCenterPage() {
       filename: file.name,
     });
 
+    let finalBlob: Blob = file;
+    let finalPreviewUrl: string = rawPreviewUrl;
+    let processedImageUrl: string | undefined = procResult.processedImageUrl;
+
+    if (procResult.processedBlob) {
+      finalBlob = procResult.processedBlob;
+      if (procResult.processedImageUrl) {
+        URL.revokeObjectURL(rawPreviewUrl);
+        finalPreviewUrl = procResult.processedImageUrl;
+      }
+    }
+
     if (procResult.serviceAvailable && procResult.diagnostics) {
       setCurrentPendingPage({
         pageNumber: nextPgNum,
-        previewUrl,
-        blob: file,
+        previewUrl: finalPreviewUrl,
+        blob: finalBlob,
         qualityStatus: procResult.diagnostics.status === 'RESCAN_REQUIRED' ? 'RESCAN_REQUIRED' : 'PASSED',
         diagnostics: procResult.diagnostics,
+        processedImageUrl,
       });
     } else {
       setCurrentPendingPage({
         pageNumber: nextPgNum,
-        previewUrl,
-        blob: file,
+        previewUrl: finalPreviewUrl,
+        blob: finalBlob,
         qualityStatus: 'PASSED',
         serviceUnavailableNotice: 'Scanning service unavailable on http://localhost:8000.',
+        processedImageUrl,
       });
     }
 
@@ -276,6 +307,7 @@ export function ScanCenterPage() {
         blob: currentPendingPage.blob,
         qualityStatus: currentPendingPage.qualityStatus,
         diagnostics: currentPendingPage.diagnostics,
+        processedImageUrl: currentPendingPage.processedImageUrl,
       },
     ]);
 
@@ -291,7 +323,7 @@ export function ScanCenterPage() {
   };
 
   const handleRecapturePage = () => {
-    if (currentPendingPage?.previewUrl) {
+    if (currentPendingPage?.previewUrl && currentPendingPage.previewUrl.startsWith('blob:')) {
       URL.revokeObjectURL(currentPendingPage.previewUrl);
     }
     setCurrentPendingPage(null);

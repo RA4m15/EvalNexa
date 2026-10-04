@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import base64
 import tempfile
 import importlib.util
 from typing import Any, Dict, Optional, Tuple, Union
@@ -226,6 +227,28 @@ def process_image(
 
         total_latency = (time.perf_counter() - t_start) * 1000.0
 
+        # Encode verified rectified color image as JPEG Base64 Data URI
+        processed_image_url: Optional[str] = None
+        color_candidate: Optional[np.ndarray] = None
+
+        if p8_res is not None and hasattr(p8_res, "image_bundle") and p8_res.image_bundle is not None:
+            ready_bgr = getattr(p8_res.image_bundle, "ready_bgr", None)
+            if isinstance(ready_bgr, np.ndarray) and ready_bgr.size > 0:
+                color_candidate = ready_bgr
+
+        if color_candidate is None:
+            if p6_res is not None and hasattr(p6_res, "final_safe_state") and p6_res.final_safe_state is not None:
+                raw_bgr = getattr(p6_res.final_safe_state, "raw_rectified_bgr", None)
+                if isinstance(raw_bgr, np.ndarray) and raw_bgr.size > 0:
+                    color_candidate = raw_bgr
+
+        if color_candidate is not None:
+            encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            success, encoded_buf = cv2.imencode(".jpg", color_candidate, encode_params)
+            if success:
+                b64_str = base64.b64encode(encoded_buf.tobytes()).decode("ascii")
+                processed_image_url = f"data:image/jpeg;base64,{b64_str}"
+
         return {
             "qualityStatus": quality_status,
             "blurDetected": blur_detected,
@@ -235,7 +258,7 @@ def process_image(
             "cropReady": crop_ready,
             "ocrReadiness": ocr_readiness,
             "reason": reason,
-            "processedImageUrl": None,
+            "processedImageUrl": processed_image_url,
             "ocrText": "",
         }
 
