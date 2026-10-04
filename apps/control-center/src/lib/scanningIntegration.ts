@@ -24,6 +24,7 @@ export interface ProcessPageResult {
   serviceAvailable: boolean;
   diagnostics?: PageQualityDiagnostics;
   processedImageUrl?: string;
+  processedBlob?: Blob;
   ocrText?: string;
   errorMessage?: string;
 }
@@ -105,6 +106,20 @@ export async function processPageWithOpenCVService(
     }
 
     const data = await res.json();
+
+    let processedBlob: Blob | undefined = undefined;
+    if (
+      typeof data.processedImageUrl === 'string' &&
+      data.processedImageUrl.startsWith('data:image/jpeg;base64,')
+    ) {
+      try {
+        const imageRes = await fetch(data.processedImageUrl);
+        processedBlob = await imageRes.blob();
+      } catch {
+        processedBlob = undefined;
+      }
+    }
+
     return {
       success: true,
       serviceAvailable: true,
@@ -119,6 +134,7 @@ export async function processPageWithOpenCVService(
         reason: data.reason,
       },
       processedImageUrl: data.processedImageUrl,
+      processedBlob,
       ocrText: data.ocrText,
     };
   } catch (err: any) {
