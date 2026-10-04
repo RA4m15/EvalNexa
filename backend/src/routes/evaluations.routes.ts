@@ -5,6 +5,7 @@ import {
   startEvaluation,
   updateEvaluation,
   submitEvaluation,
+  getAIEvaluationSuggestion,
 } from '../controllers/evaluations.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -19,5 +20,17 @@ router.get('/:id', authorize('ADMIN', 'MODERATOR', 'EXAMINER'), getEvaluationByI
 router.post('/:id/start', authorize('EXAMINER'), startEvaluation);
 router.patch('/:id', authorize('EXAMINER'), validate(updateEvaluationSchema), updateEvaluation);
 router.post('/:id/submit', authorize('EXAMINER'), validate(submitEvaluationSchema), submitEvaluation);
+
+// AI-Assisted Question Evaluation Copilot
+router.get(
+  '/:id/questions/:questionNumber/suggest',
+  authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
+  getAIEvaluationSuggestion
+);
+router.post(
+  '/:id/questions/:questionNumber/suggest',
+  authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
+  getAIEvaluationSuggestion
+);
 
 export default router;

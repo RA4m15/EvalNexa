@@ -12,6 +12,10 @@ export interface IQuestion extends Document {
   text: string;
   maximumMarks: number;
   rubric: IQuestionRubricItem[];
+  referenceAnswer?: string;
+  keyConcepts?: string[];
+  gradingNotes?: string;
+  evaluationLanguage?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -51,6 +55,10 @@ const QuestionSchema = new Schema<IQuestion>(
       type: [RubricItemSchema],
       default: [],
     },
+    referenceAnswer: { type: String, trim: true },
+    keyConcepts: { type: [String], default: undefined },
+    gradingNotes: { type: String, trim: true },
+    evaluationLanguage: { type: String, trim: true },
   },
   { timestamps: true }
 );

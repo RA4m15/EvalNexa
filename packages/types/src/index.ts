@@ -152,11 +152,30 @@ export type EvaluationStatus =
 // --- Question Marking Status ---
 export type QuestionMarkStatus = 'NOT_STARTED' | 'MARKED' | 'FLAGGED' | 'NOT_ATTEMPTED';
 
+export interface QuestionMarkAiAnalysis {
+  suggestedMarks: number;
+  minMarks: number;
+  maxMarks: number;
+  confidence: number;
+  needsHumanReview: boolean;
+  criteria: Array<{
+    name: string;
+    maxMarks: number;
+    awardedMarks: number;
+    evidence: string;
+  }>;
+  missingConcepts: string[];
+  reasoningSummary: string;
+  generatedAt: string;
+  model: string;
+}
+
 export interface QuestionMarkItem {
   questionNumber: number;
   marks: number;
   status: QuestionMarkStatus;
   comment?: string;
+  aiAnalysis?: QuestionMarkAiAnalysis;
 }
 
 // --- Evaluation ---
@@ -187,8 +206,47 @@ export interface Question {
   text: string;
   maximumMarks: number;
   rubric: QuestionRubricItem[];
+  referenceAnswer?: string;
+  keyConcepts?: string[];
+  gradingNotes?: string;
+  evaluationLanguage?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+// --- AI Evaluation Assistant ---
+export interface EvaluationAssistantCriteriaSuggestion {
+  name: string;
+  maxMarks: number;
+  awardedMarks: number;
+  evidence: string;
+}
+
+export interface EvaluationAssistantResult {
+  suggestedMarks: number;
+  minMarks: number;
+  maxMarks: number;
+  confidence: number;
+  needsHumanReview: boolean;
+  criteria: EvaluationAssistantCriteriaSuggestion[];
+  missingConcepts: string[];
+  reasoningSummary: string;
+}
+
+export interface EvaluationAssistantInput {
+  question: string;
+  maximumMarks: number;
+  rubric: Array<{
+    criterion: string;
+    marks: number;
+  }>;
+  referenceAnswer?: string;
+  keyConcepts?: string[];
+  gradingNotes?: string;
+  studentAnswerImage?: string;
+  ocrText?: string;
+  ocrConfidence?: number | null;
+  language?: string;
 }
 
 // --- Moderation ---
@@ -327,6 +385,7 @@ export type SocketEvent =
   | 'evaluation.started'
   | 'evaluation.updated'
   | 'evaluation.submitted'
+  | 'evaluation.ai.updated'
   | 'moderation.approved'
   | 'moderation.returned'
   | 'result.finalized'

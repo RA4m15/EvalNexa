@@ -128,6 +128,10 @@ export const createQuestionSchema = z.object({
     )
     .optional()
     .default([]),
+  referenceAnswer: z.string().optional(),
+  keyConcepts: z.array(z.string()).optional(),
+  gradingNotes: z.string().optional(),
+  evaluationLanguage: z.string().optional(),
 });
 
 export const updateQuestionSchema = z.object({
@@ -142,4 +146,8 @@ export const updateQuestionSchema = z.object({
       })
     )
     .optional(),
+  referenceAnswer: z.string().optional(),
+  keyConcepts: z.array(z.string()).optional(),
+  gradingNotes: z.string().optional(),
+  evaluationLanguage: z.string().optional(),
 });

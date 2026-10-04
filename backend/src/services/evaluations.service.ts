@@ -1,11 +1,14 @@
 import mongoose from 'mongoose';
 import { Evaluation, IEvaluation, IEvaluationQuestionMark } from '../models/Evaluation';
 import { AnswerBook } from '../models/AnswerBook';
+import { AnswerPage } from '../models/AnswerPage';
 import { Question } from '../models/Question';
 import { Exam } from '../models/Exam';
 import { validateStateTransition } from './answerBooks.service';
 import { logAuditAction } from './audit.service';
 import { emitToAll, emitToRole } from '../sockets';
+import { generateAuthorizedMediaUrl } from './media.service';
+import { EvaluationAssistantService } from './EvaluationAssistantService';
 
 export interface IAuthoritativeQuestion {
   questionNumber: number;
@@ -530,4 +533,219 @@ export async function submitEvaluationFinal(
   emitToRole('MODERATOR', 'evaluation.submitted', { evaluation, answerBook });
 
   return { evaluation, answerBook };
+}
+
+/**
+ * Requests AI-assisted evaluation for a question.
+ * Fetches authoritative data, secures media through signed delivery, invokes EvaluationAssistantService,
+ * stores aiAnalysis in the evaluation model, and emits real-time socket events.
+ * AI analysis remains completely separate from final examiner marks.
+ */
+export async function requestAISuggestionForQuestion(
+  evaluationId: string,
+  questionNumber: number,
+  options: {
+    pageNumber?: number;
+    forceRefresh?: boolean;
+    userRole: string;
+    userId: string;
+    userName?: string;
+  }
+) {
+  // 1. Authenticate user & RBAC
+  const evaluation = await Evaluation.findById(evaluationId);
+  if (!evaluation) {
+    const error: any = new Error('Evaluation not found');
+    error.status = 404;
+    error.code = 'EVALUATION_NOT_FOUND';
+    throw error;
+  }
+
+  // 2. Only assigned examiner can request suggestion, unless privileged role (ADMIN, MODERATOR)
+  if (options.userRole === 'EXAMINER') {
+    const examinerId =
+      typeof evaluation.examinerId === 'object' &&
+      evaluation.examinerId !== null &&
+      '_id' in (evaluation.examinerId as any)
+        ? (evaluation.examinerId as any)._id.toString()
+        : evaluation.examinerId.toString();
+
+    if (examinerId !== options.userId) {
+      const error: any = new Error(
+        'Access denied: You are not the assigned examiner for this evaluation'
+      );
+      error.status = 403;
+      error.code = 'UNAUTHORIZED_EXAMINER_ACCESS';
+      throw error;
+    }
+  }
+
+  // 3. Check for existing cached analysis to avoid redundant duplicate AI generation
+  const existingIndex = evaluation.questionMarks.findIndex(
+    (q) => q.questionNumber === questionNumber
+  );
+  const existingQm = existingIndex >= 0 ? evaluation.questionMarks[existingIndex] : null;
+
+  if (existingQm?.aiAnalysis && !options.forceRefresh) {
+    return {
+      cached: true,
+      aiAnalysis: existingQm.aiAnalysis,
+      evaluationId: evaluation._id.toString(),
+      questionNumber,
+    };
+  }
+
+  // 4. Fetch authoritative AnswerBook, Exam, Question, Rubric, Reference Answer
+  const answerBook = await AnswerBook.findById(evaluation.answerBookId);
+  if (!answerBook) {
+    const error: any = new Error('Associated answer book not found');
+    error.status = 404;
+    error.code = 'ANSWER_BOOK_NOT_FOUND';
+    throw error;
+  }
+
+  const examId =
+    typeof answerBook.examId === 'object' &&
+    answerBook.examId !== null &&
+    '_id' in (answerBook.examId as any)
+      ? (answerBook.examId as any)._id
+      : answerBook.examId;
+
+  const exam = await Exam.findById(examId);
+  if (!exam) {
+    const error: any = new Error('Associated exam not found');
+    error.status = 404;
+    error.code = 'EXAM_NOT_FOUND';
+    throw error;
+  }
+
+  const question = await Question.findOne({ examId, questionNumber });
+  if (!question) {
+    const error: any = new Error(`Question Q${questionNumber} not found for this examination`);
+    error.status = 404;
+    error.code = 'QUESTION_NOT_FOUND';
+    throw error;
+  }
+
+  // 5. Fetch relevant AnswerPage and secure media through existing secure media layer
+  let answerPage = null;
+  if (options.pageNumber) {
+    answerPage = await AnswerPage.findOne({
+      answerBookId: answerBook._id,
+      pageNumber: options.pageNumber,
+    });
+  } else {
+    // Look for page matching questionNumber, or page 1
+    answerPage =
+      (await AnswerPage.findOne({ answerBookId: answerBook._id, pageNumber: questionNumber })) ||
+      (await AnswerPage.findOne({ answerBookId: answerBook._id }).sort({ pageNumber: 1 }));
+  }
+
+  let signedMediaUrl: string | undefined = undefined;
+  if (answerPage?.cloudinary?.publicId) {
+    // Generate secure time-limited signed URL through existing secure media layer
+    const signed = generateAuthorizedMediaUrl(answerPage.cloudinary.publicId, {
+      resourceType: answerPage.cloudinary.resourceType,
+      deliveryType: answerPage.cloudinary.deliveryType,
+      format: answerPage.cloudinary.format,
+      expiresInSeconds: 3600,
+    });
+    signedMediaUrl = signed.secureUrl;
+
+    // Audit media access
+    await logAuditAction({
+      actorId: options.userId,
+      actorName: options.userName || 'Assigned Examiner',
+      actorRole: options.userRole,
+      action: 'MEDIA_ACCESSED_BY_AI_COPILOT',
+      entityType: 'AnswerPage',
+      entityId: answerPage._id.toString(),
+      metadata: {
+        evaluationId: evaluation._id.toString(),
+        answerBookId: answerBook._id.toString(),
+        pageNumber: answerPage.pageNumber,
+        questionNumber,
+      },
+    });
+  }
+
+  // 6. Call EvaluationAssistantService
+  const assistantResult = await EvaluationAssistantService.evaluateStudentAnswer({
+    question: question.text,
+    maximumMarks: question.maximumMarks,
+    rubric: question.rubric.map((r) => ({
+      criterion: r.criterion,
+      marks: r.marks,
+    })),
+    referenceAnswer: question.referenceAnswer,
+    keyConcepts: question.keyConcepts,
+    gradingNotes: question.gradingNotes,
+    language: question.evaluationLanguage,
+    studentAnswerImage: signedMediaUrl,
+    studentAnswerImageMimeType:
+      answerPage?.cloudinary?.format === 'pdf' ? 'application/pdf' : 'image/jpeg',
+    ocrText: answerPage?.ocr?.text,
+    ocrConfidence: answerPage?.ocr?.confidence,
+  });
+
+  // 7. Store AI analysis in evaluation question data model (NEVER touching final examiner marks)
+  const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  const aiAnalysisData = {
+    suggestedMarks: assistantResult.suggestedMarks,
+    minMarks: assistantResult.minMarks,
+    maxMarks: assistantResult.maxMarks,
+    confidence: assistantResult.confidence,
+    needsHumanReview: assistantResult.needsHumanReview,
+    criteria: assistantResult.criteria,
+    missingConcepts: assistantResult.missingConcepts,
+    reasoningSummary: assistantResult.reasoningSummary,
+    generatedAt: new Date(),
+    model: modelName,
+  };
+
+  if (existingIndex >= 0) {
+    evaluation.questionMarks[existingIndex].aiAnalysis = aiAnalysisData;
+  } else {
+    evaluation.questionMarks.push({
+      questionNumber,
+      marks: 0,
+      status: 'NOT_STARTED',
+      aiAnalysis: aiAnalysisData,
+    });
+  }
+
+  // Save evaluation (marks and totalMarks remain untouched by AI)
+  await evaluation.save();
+
+  // 8. Audit log
+  await logAuditAction({
+    actorId: options.userId,
+    actorName: options.userName || 'Assigned Examiner',
+    actorRole: options.userRole,
+    action: 'EVALUATION_AI_ASSISTED',
+    entityType: 'Evaluation',
+    entityId: evaluation._id.toString(),
+    metadata: {
+      questionNumber,
+      suggestedMarks: assistantResult.suggestedMarks,
+      confidence: assistantResult.confidence,
+      needsHumanReview: assistantResult.needsHumanReview,
+      model: modelName,
+      generatedAt: aiAnalysisData.generatedAt.toISOString(),
+    },
+  });
+
+  // 9. Emit Socket.IO event
+  emitToAll('evaluation.ai.updated', {
+    evaluationId: evaluation._id.toString(),
+    questionNumber,
+    aiAnalysis: aiAnalysisData,
+  });
+
+  return {
+    cached: false,
+    aiAnalysis: aiAnalysisData,
+    evaluationId: evaluation._id.toString(),
+    questionNumber,
+  };
 }
