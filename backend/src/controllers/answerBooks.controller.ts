@@ -5,7 +5,7 @@ import {
   ingestAnswerBookData,
   updateScriptProcessingStatus,
 } from '../services/ingestion.service';
-import { AnswerBook } from '../models/AnswerBook';
+import { AnswerBook, IQuestionPageMapping } from '../models/AnswerBook';
 import { AnswerPage } from '../models/AnswerPage';
 import {
   generateAuthorizedMediaUrl,
@@ -17,6 +17,10 @@ import {
 } from '../services/media.service';
 import { logAuditAction } from '../services/audit.service';
 import { emitToAll } from '../sockets';
+import path from 'path';
+import fs from 'fs';
+import mongoose from 'mongoose';
+import { config } from '../config';
 
 export async function getAnswerBooks(req: AuthRequest, res: Response): Promise<void> {
   try {
@@ -332,13 +336,32 @@ export async function getAnswerBookPage(req: AuthRequest, res: Response): Promis
       return;
     }
 
-    // Generate secure time-limited signed URL (1 hour)
-    const signedMedia = generateAuthorizedMediaUrl(page.cloudinary.publicId, {
-      resourceType: page.cloudinary.resourceType,
-      deliveryType: page.cloudinary.deliveryType,
-      format: page.cloudinary.format,
-      expiresInSeconds: 3600,
-    });
+    // Determine delivery URL (Cloudinary signed URL or local image streamer)
+    let deliveryUrl = page.cloudinary?.secureUrl;
+    const isCloudinaryActive = Boolean(
+      config.cloudinary.cloudName &&
+      config.cloudinary.cloudName !== 'Root' &&
+      config.cloudinary.apiKey &&
+      config.cloudinary.apiSecret
+    );
+
+    if (isCloudinaryActive && page.cloudinary?.publicId && !page.cloudinary.publicId.startsWith('local:')) {
+      try {
+        const signedMedia = generateAuthorizedMediaUrl(page.cloudinary.publicId, {
+          resourceType: page.cloudinary.resourceType,
+          deliveryType: page.cloudinary.deliveryType,
+          format: page.cloudinary.format,
+          expiresInSeconds: 3600,
+        });
+        deliveryUrl = signedMedia.secureUrl;
+      } catch {
+        // Fallback to local
+      }
+    }
+
+    if (!deliveryUrl || deliveryUrl.includes('/Root/')) {
+      deliveryUrl = `/api/answer-books/${answerBook._id}/pages/${pageNum}/image`;
+    }
 
     // Audit log media access
     await logAuditAction({
@@ -359,15 +382,15 @@ export async function getAnswerBookPage(req: AuthRequest, res: Response): Promis
       success: true,
       data: {
         pageNumber: page.pageNumber,
-        secureUrl: signedMedia.secureUrl,
-        expiresAt: signedMedia.expiresAt,
+        secureUrl: deliveryUrl,
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
         ocr: page.ocr,
         quality: page.quality,
         processingStatus: page.processingStatus,
         finalized: page.finalized,
-        width: page.cloudinary.width,
-        height: page.cloudinary.height,
-        format: page.cloudinary.format,
+        width: page.cloudinary?.width,
+        height: page.cloudinary?.height,
+        format: page.cloudinary?.format || 'jpg',
       },
     });
   } catch (error: any) {
@@ -376,6 +399,105 @@ export async function getAnswerBookPage(req: AuthRequest, res: Response): Promis
       success: false,
       message: error.message || 'Failed to retrieve answer page',
     });
+  }
+}
+
+/**
+ * Serves real scanned page images from local disk.
+ * Enables zero-external-dependency image delivery for browser <img> tags.
+ */
+export async function getAnswerBookPageImage(req: Request, res: Response): Promise<void> {
+  try {
+    const { id, pageNumber } = req.params;
+    const pageNum = parseInt(pageNumber, 10);
+    if (isNaN(pageNum) || pageNum < 1) {
+      res.status(400).json({ success: false, message: 'Invalid page number' });
+      return;
+    }
+
+    const answerBook = await AnswerBook.findOne({
+      $or: [
+        { _id: mongoose.isValidObjectId(id) ? id : null },
+        { answerBookCode: id }
+      ]
+    });
+
+    if (!answerBook) {
+      res.status(404).json({ success: false, message: 'Answer book not found' });
+      return;
+    }
+
+    const pageFileName = `page-${String(pageNum).padStart(4, '0')}.jpg`;
+    const localFilePath = path.join(
+      process.cwd(),
+      'uploads',
+      'answer-books',
+      answerBook.answerBookCode,
+      'pages',
+      pageFileName
+    );
+
+    if (!fs.existsSync(localFilePath)) {
+      res.status(404).json({ success: false, message: `Page ${pageNum} image not found on server` });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    fs.createReadStream(localFilePath).pipe(res);
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+/**
+ * Updates question-to-page mappings for an answer book.
+ * Allows examiner/moderator to correct or customize which pages belong to which question.
+ */
+export async function updateQuestionPageMapping(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { questionNumber, pages } = req.body;
+
+    if (!questionNumber || !Array.isArray(pages) || pages.length === 0) {
+      res.status(400).json({ success: false, message: 'Invalid questionNumber or pages array' });
+      return;
+    }
+
+    const answerBook = await AnswerBook.findById(id);
+    if (!answerBook) {
+      res.status(404).json({ success: false, message: 'Answer book not found' });
+      return;
+    }
+
+    if (!answerBook.questionPageMapping) {
+      answerBook.questionPageMapping = [];
+    }
+
+    const existingIdx = answerBook.questionPageMapping.findIndex(
+      (m: IQuestionPageMapping) => m.questionNumber === Number(questionNumber)
+    );
+
+    if (existingIdx >= 0) {
+      answerBook.questionPageMapping[existingIdx].pages = pages.map(Number);
+      answerBook.questionPageMapping[existingIdx].verified = true;
+    } else {
+      answerBook.questionPageMapping.push({
+        questionNumber: Number(questionNumber),
+        pages: pages.map(Number),
+        verified: true,
+      });
+    }
+
+    await answerBook.save();
+
+    res.json({
+      success: true,
+      message: `Mapping updated for Question ${questionNumber}`,
+      data: answerBook.questionPageMapping,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
   }
 }
 

@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { Evaluation, IEvaluation, IEvaluationQuestionMark } from '../models/Evaluation';
-import { AnswerBook } from '../models/AnswerBook';
+import { AnswerBook, IQuestionPageMapping } from '../models/AnswerBook';
 import { AnswerPage } from '../models/AnswerPage';
 import { Question } from '../models/Question';
 import { Exam } from '../models/Exam';
@@ -740,7 +740,7 @@ export async function requestAISuggestionForQuestion(
   // 5. Determine mapped pages for this question from AnswerBook questionPageMapping or options
   let targetPageNumbers: number[] = [];
   const mapping = answerBook.questionPageMapping?.find(
-    (m) => m.questionNumber === questionNumber
+    (m: IQuestionPageMapping) => m.questionNumber === questionNumber
   );
 
   if (mapping?.pages && mapping.pages.length > 0) {
