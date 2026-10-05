@@ -10,7 +10,7 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  if (user) {
+  if (user && user.role === 'ADMIN') {
     return <Navigate to="/dashboard" replace />;
   }
 

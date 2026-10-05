@@ -136,6 +136,11 @@ export interface AnswerBook {
     secureUrl?: string;
   };
   assignedExaminerId?: string | User;
+  questionPageMapping?: Array<{
+    questionNumber: number;
+    pages: number[];
+    verified?: boolean;
+  }>;
   createdAt: string;
   updatedAt: string;
 }
