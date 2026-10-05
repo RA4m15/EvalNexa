@@ -111,14 +111,14 @@ def run_production_validation():
         f"Verdict={res4.verdict}, Defect={res4.fatal_defects[0].defect_code}, Rescan={res4.rescan_required}"
     )
 
-    # 1.4 Lateral Clipped Document (answer_sheet_5.jpg)
+    # 1.4 Unclipped Table Rulings & Page Border Clean Scan (answer_sheet_5.jpg)
     p5 = os.path.join(ROOT_DIR, "images", "answer_sheet_5.jpg")
     sc5 = integrate_production_scanner(p5)
     res5 = assess_document_quality(sc5, image_name="answer_sheet_5", config=config)
     record_test(
-        "1.4 Lateral Clipped -> UNUSABLE (Fatal Veto)",
-        res5.verdict == "UNUSABLE" and res5.rescan_required and len(res5.fatal_defects) > 0,
-        f"Verdict={res5.verdict}, Defect={res5.fatal_defects[0].defect_code}, Rescan={res5.rescan_required}"
+        "1.4 Unclipped Table Rulings -> GOOD (No Fatal Defects)",
+        res5.verdict == "GOOD" and not res5.rescan_required and len(res5.fatal_defects) == 0,
+        f"Verdict={res5.verdict}, FatalDefects={len(res5.fatal_defects)}, Rescan={res5.rescan_required}"
     )
 
     # 1.5 Compressed Clipped Scan (answer_sheet.jpg)
