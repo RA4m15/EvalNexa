@@ -145,18 +145,53 @@ def process_image(
 
             # Document / page validity gate (Step 2A): prevent unresolvable/non-document inputs from reaching Phase 5
             if p3_res.status == "AMBIGUOUS_UNWARPED":
-                return {
-                    "qualityStatus": "RESCAN_REQUIRED",
-                    "blurDetected": False,
-                    "sharpness": 0.0,
-                    "orientation": "NORMAL",
-                    "pageDetected": False,
-                    "cropReady": False,
-                    "ocrReadiness": "FAILED",
-                    "reason": "No document detected. Please ensure the answer sheet is clearly visible within the camera viewfinder.",
-                    "processedImageUrl": None,
-                    "ocrText": "",
-                }
+                notes_text = " ".join(p3_res.processing_notes or [])
+                has_credible_page = (
+                    "Phase 2.13 arbitration result: AMBIGUOUS" in notes_text
+                    or "Branch C entered: AMBIGUOUS" in notes_text
+                )
+
+                if has_credible_page:
+                    preview_url = None
+                    sharpness_score = 0.0
+                    blur_flagged = False
+                    if p3_res.scanned_image is not None and p3_res.scanned_image.size > 0:
+                        img_bgr = p3_res.scanned_image
+                        gray_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY) if img_bgr.ndim == 3 else img_bgr
+                        lap_var = float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
+                        sharpness_score, blur_flagged = compute_sharpness_score(lap_var)
+
+                        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+                        success, encoded_buf = cv2.imencode(".jpg", img_bgr, encode_params)
+                        if success:
+                            b64_str = base64.b64encode(encoded_buf.tobytes()).decode("ascii")
+                            preview_url = f"data:image/jpeg;base64,{b64_str}"
+
+                    return {
+                        "qualityStatus": "HUMAN_REVIEW",
+                        "blurDetected": blur_flagged,
+                        "sharpness": sharpness_score,
+                        "orientation": "NORMAL",
+                        "pageDetected": False,
+                        "cropReady": False,
+                        "ocrReadiness": "UNCLEAR",
+                        "reason": "Document detected, but page boundaries could not be reliably resolved. Human verification required.",
+                        "processedImageUrl": preview_url,
+                        "ocrText": "",
+                    }
+                else:
+                    return {
+                        "qualityStatus": "RESCAN_REQUIRED",
+                        "blurDetected": False,
+                        "sharpness": 0.0,
+                        "orientation": "NORMAL",
+                        "pageDetected": False,
+                        "cropReady": False,
+                        "ocrReadiness": "FAILED",
+                        "reason": "No document detected. Please ensure the answer sheet is clearly visible within the camera viewfinder.",
+                        "processedImageUrl": None,
+                        "ocrText": "",
+                    }
 
             rectified_bgr = p3_res.scanned_image
             if rectified_bgr is None or rectified_bgr.size == 0:

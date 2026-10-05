@@ -481,9 +481,35 @@ def extract_curated_quality_profile(
     n_occ_cc, _, occ_stats, _ = cv2.connectedComponentsWithStats(occlusion_mask.astype(np.uint8))
     large_occlusion_pixels = 0
     foreign_object = False
+
+    eval_x0 = bx if has_valid_box else 0
+    eval_y0 = by if has_valid_box else 0
+    eval_x1 = (bx + bw) if has_valid_box else w
+    eval_y1 = (by + bh) if has_valid_box else h
+
     for i in range(1, n_occ_cc):
         area = occ_stats[i, cv2.CC_STAT_AREA]
         if area > (margin_w * margin_h * 0.4):
+            cw_comp = int(occ_stats[i, cv2.CC_STAT_WIDTH])
+            ch_comp = int(occ_stats[i, cv2.CC_STAT_HEIGHT])
+            cx_comp = int(occ_stats[i, cv2.CC_STAT_LEFT])
+            cy_comp = int(occ_stats[i, cv2.CC_STAT_TOP])
+
+            # Ignore clearly elongated boundary-strip components (background contrast or ruling fringes)
+            comp_ar = float(max(cw_comp, ch_comp)) / max(1, min(cw_comp, ch_comp))
+            is_boundary_anchored = bool(
+                cx_comp <= eval_x0 + 3 or
+                cy_comp <= eval_y0 + 3 or
+                (cx_comp + cw_comp) >= eval_x1 - 3 or
+                (cy_comp + ch_comp) >= eval_y1 - 3 or
+                cx_comp <= 3 or
+                cy_comp <= 3 or
+                (cx_comp + cw_comp) >= w - 3 or
+                (cy_comp + ch_comp) >= h - 3
+            )
+            if comp_ar >= 5.0 and is_boundary_anchored:
+                continue
+
             large_occlusion_pixels += area
             foreign_object = True
 
