@@ -30,9 +30,15 @@ export const config = {
     process.env.CONTROL_CENTER_ORIGIN || process.env.CLIENT_CONTROL_CENTER_URL || 'http://localhost:5173',
     process.env.EXAMINER_ORIGIN || process.env.CLIENT_EXAMINER_URL || 'http://localhost:5174',
     process.env.MODERATION_ORIGIN || process.env.CLIENT_MODERATION_URL || 'http://localhost:5175',
+    'http://localhost:5176',
+    'http://localhost:5177',
+    'http://localhost:5178',
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5174',
     'http://127.0.0.1:5175',
+    'http://127.0.0.1:5176',
+    'http://127.0.0.1:5177',
+    'http://127.0.0.1:5178',
   ],
   cloudinary: {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
@@ -40,4 +46,11 @@ export const config = {
     apiSecret: process.env.CLOUDINARY_API_SECRET || '',
   },
   ingestionApiKey: process.env.INGESTION_API_KEY || '',
+  gemini: {
+    apiKey: process.env.GEMINI_API_KEY || '',
+    model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+    isConfigured: Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0),
+  },
 };
+
+export { geminiManager } from './gemini';

@@ -9,6 +9,8 @@ import { logAuditAction } from './audit.service';
 import { emitToAll, emitToRole } from '../sockets';
 import { generateAuthorizedMediaUrl } from './media.service';
 import { EvaluationAssistantService } from './EvaluationAssistantService';
+import fs from 'fs';
+import path from 'path';
 
 export interface IAuthoritativeQuestion {
   questionNumber: number;
@@ -661,6 +663,14 @@ export async function requestAISuggestionForQuestion(
     throw error;
   }
 
+  // Allow only EXAMINER, MODERATOR, or ADMIN
+  if (!['EXAMINER', 'MODERATOR', 'ADMIN'].includes(options.userRole)) {
+    const error: any = new Error('Forbidden: Your role is not authorized to request AI evaluation suggestions');
+    error.status = 403;
+    error.code = 'FORBIDDEN_ROLE';
+    throw error;
+  }
+
   // 2. Only assigned examiner can request suggestion, unless privileged role (ADMIN, MODERATOR)
   if (options.userRole === 'EXAMINER') {
     const examinerId =
@@ -727,30 +737,94 @@ export async function requestAISuggestionForQuestion(
     throw error;
   }
 
-  // 5. Fetch relevant AnswerPage and secure media through existing secure media layer
-  let answerPage = null;
-  if (options.pageNumber) {
-    answerPage = await AnswerPage.findOne({
-      answerBookId: answerBook._id,
-      pageNumber: options.pageNumber,
-    });
-  } else {
-    // Look for page matching questionNumber, or page 1
-    answerPage =
-      (await AnswerPage.findOne({ answerBookId: answerBook._id, pageNumber: questionNumber })) ||
-      (await AnswerPage.findOne({ answerBookId: answerBook._id }).sort({ pageNumber: 1 }));
+  // 5. Determine mapped pages for this question from AnswerBook questionPageMapping or options
+  let targetPageNumbers: number[] = [];
+  const mapping = answerBook.questionPageMapping?.find(
+    (m) => m.questionNumber === questionNumber
+  );
+
+  if (mapping?.pages && mapping.pages.length > 0) {
+    targetPageNumbers = mapping.pages;
+  } else if (options.pageNumber) {
+    targetPageNumbers = [options.pageNumber];
   }
 
-  let signedMediaUrl: string | undefined = undefined;
-  if (answerPage?.cloudinary?.publicId) {
-    // Generate secure time-limited signed URL through existing secure media layer
-    const signed = generateAuthorizedMediaUrl(answerPage.cloudinary.publicId, {
-      resourceType: answerPage.cloudinary.resourceType,
-      deliveryType: answerPage.cloudinary.deliveryType,
-      format: answerPage.cloudinary.format,
-      expiresInSeconds: 3600,
-    });
-    signedMediaUrl = signed.secureUrl;
+  // Safety Gate: If question is not mapped to any pages, do not evaluate
+  if (targetPageNumbers.length === 0) {
+    const error: any = new Error(
+      `Question Q${questionNumber} is not mapped to any scanned answer pages. AI copilot cannot evaluate without mapped page evidence.`
+    );
+    error.status = 400;
+    error.code = 'QUESTION_PAGES_NOT_MAPPED';
+    throw error;
+  }
+
+  // Fetch all mapped AnswerPages in strict ascending page order
+  const answerPages = await AnswerPage.find({
+    answerBookId: answerBook._id,
+    pageNumber: { $in: targetPageNumbers },
+  }).sort({ pageNumber: 1 });
+
+  // Safety Gate: Ensure ALL mapped pages exist
+  if (answerPages.length !== targetPageNumbers.length) {
+    const foundNumbers = new Set(answerPages.map((p) => p.pageNumber));
+    const missingPages = targetPageNumbers.filter((pn) => !foundNumbers.has(pn));
+    const error: any = new Error(
+      `Required scanned answer page(s) [${missingPages.join(', ')}] not found for question Q${questionNumber}. Incomplete evidence cannot be evaluated.`
+    );
+    error.status = 400;
+    error.code = 'MISSING_ANSWER_PAGES';
+    throw error;
+  }
+
+  const studentImages: Array<string | Buffer> = [];
+  const ocrParts: string[] = [];
+  let avgConfidenceSum = 0;
+  let ocrConfidenceCount = 0;
+
+  for (const p of answerPages) {
+    // 1. Try reading real high-res page directly from local uploads/ folder if available
+    const pageFileName = `page-${String(p.pageNumber).padStart(4, '0')}.jpg`;
+    const localFilePath = path.join(
+      process.cwd(),
+      'uploads',
+      'answer-books',
+      answerBook.answerBookCode,
+      'pages',
+      pageFileName
+    );
+
+    let imageLoaded = false;
+    if (fs.existsSync(localFilePath)) {
+      try {
+        const fileBuffer = fs.readFileSync(localFilePath);
+        studentImages.push(fileBuffer);
+        imageLoaded = true;
+      } catch {
+        // Fall back to Cloudinary URL below
+      }
+    }
+
+    // 2. If not read from disk, use secure Cloudinary URL
+    if (!imageLoaded && p.cloudinary?.publicId) {
+      const signed = generateAuthorizedMediaUrl(p.cloudinary.publicId, {
+        resourceType: p.cloudinary.resourceType,
+        deliveryType: p.cloudinary.deliveryType,
+        format: p.cloudinary.format,
+        expiresInSeconds: 3600,
+      });
+      if (signed?.secureUrl) {
+        studentImages.push(signed.secureUrl);
+      }
+    }
+
+    if (p.ocr?.text && p.ocr.text.trim().length > 0) {
+      ocrParts.push(`--- Page ${p.pageNumber} ---\n${p.ocr.text}`);
+    }
+    if (p.ocr?.confidence !== undefined && p.ocr.confidence !== null) {
+      avgConfidenceSum += p.ocr.confidence;
+      ocrConfidenceCount++;
+    }
 
     // Audit media access
     await logAuditAction({
@@ -759,17 +833,27 @@ export async function requestAISuggestionForQuestion(
       actorRole: options.userRole,
       action: 'MEDIA_ACCESSED_BY_AI_COPILOT',
       entityType: 'AnswerPage',
-      entityId: answerPage._id.toString(),
+      entityId: p._id.toString(),
       metadata: {
         evaluationId: evaluation._id.toString(),
         answerBookId: answerBook._id.toString(),
-        pageNumber: answerPage.pageNumber,
+        pageNumber: p.pageNumber,
         questionNumber,
       },
     });
   }
 
-  // 6. Call EvaluationAssistantService
+  // Safety Gate: Ensure ALL mapped pages have their media/image retrieved
+  if (studentImages.length !== targetPageNumbers.length) {
+    const error: any = new Error(
+      `Could not retrieve media for all mapped pages (retrieved ${studentImages.length} of ${targetPageNumbers.length}). Incomplete evidence cannot be evaluated.`
+    );
+    error.status = 400;
+    error.code = 'INCOMPLETE_PAGE_MEDIA';
+    throw error;
+  }
+
+  // 6. Call EvaluationAssistantService with all multi-page images and OCR
   const assistantResult = await EvaluationAssistantService.evaluateStudentAnswer({
     question: question.text,
     maximumMarks: question.maximumMarks,
@@ -781,15 +865,14 @@ export async function requestAISuggestionForQuestion(
     keyConcepts: question.keyConcepts,
     gradingNotes: question.gradingNotes,
     language: question.evaluationLanguage,
-    studentAnswerImage: signedMediaUrl,
-    studentAnswerImageMimeType:
-      answerPage?.cloudinary?.format === 'pdf' ? 'application/pdf' : 'image/jpeg',
-    ocrText: answerPage?.ocr?.text,
-    ocrConfidence: answerPage?.ocr?.confidence,
+    studentAnswerImages: studentImages,
+    studentAnswerImageMimeType: 'image/jpeg',
+    ocrText: ocrParts.join('\n\n'),
+    ocrConfidence: ocrConfidenceCount > 0 ? avgConfidenceSum / ocrConfidenceCount : null,
   });
 
   // 7. Store AI analysis in evaluation question data model (NEVER touching final examiner marks)
-  const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+  const actualModelName = assistantResult.model || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   const aiAnalysisData = {
     suggestedMarks: assistantResult.suggestedMarks,
     minMarks: assistantResult.minMarks,
@@ -800,7 +883,7 @@ export async function requestAISuggestionForQuestion(
     missingConcepts: assistantResult.missingConcepts,
     reasoningSummary: assistantResult.reasoningSummary,
     generatedAt: new Date(),
-    model: modelName,
+    model: actualModelName,
   };
 
   if (existingIndex >= 0) {
@@ -830,7 +913,7 @@ export async function requestAISuggestionForQuestion(
       suggestedMarks: assistantResult.suggestedMarks,
       confidence: assistantResult.confidence,
       needsHumanReview: assistantResult.needsHumanReview,
-      model: modelName,
+      model: actualModelName,
       generatedAt: aiAnalysisData.generatedAt.toISOString(),
     },
   });
