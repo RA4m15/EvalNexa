@@ -8,10 +8,13 @@
     "start": "node dist/server.js",
     "seed": "tsx src/scripts/seed.ts",
     "create-admin": "tsx src/scripts/createAdmin.ts",
-    "seed-users": "tsx src/scripts/seedUsers.ts"
+    "seed-users": "tsx src/scripts/seedUsers.ts",
+    "test:evaluation": "tsx src/scripts/testEvaluationValidation.ts",
+    "test": "tsx src/scripts/testEvaluationValidation.ts"
   },
   "dependencies": {
     "@evalnexa/types": "workspace:*",
+    "@google/generative-ai": "^0.24.1",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.11.0",
     "cookie-parser": "^1.4.6",

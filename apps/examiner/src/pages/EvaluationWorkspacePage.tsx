@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../lib/apiClient';
-import { AnswerBook, Evaluation, Exam, Question, QuestionMarkItem, QuestionMarkStatus } from '@evalnexa/types';
+import { AnswerBook, Evaluation, Exam, Question, QuestionMarkItem, QuestionMarkStatus, QuestionMarkAiAnalysis } from '@evalnexa/types';
 import { getSocket } from '../lib/socket';
 
 interface WorkspaceData {
@@ -30,26 +30,13 @@ export function EvaluationWorkspacePage() {
   const [evaluationRemarks, setEvaluationRemarks] = useState('');
   const [marksState, setMarksState] = useState<QuestionMarkItem[]>([]);
 
-  // Real-time synchronization
+  // AI Copilot state
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [ignoredQuestions, setIgnoredQuestions] = useState<Record<number, boolean>>({});
+
   useEffect(() => {
-    const socket = getSocket();
-    if (!socket) return;
-
-    const handleUpdate = () => {
-      queryClient.invalidateQueries({ queryKey: ['paper', id] });
-      queryClient.invalidateQueries({ queryKey: ['my-papers'] });
-    };
-
-    socket.on('answerbook.status.changed', handleUpdate);
-    socket.on('moderation.returned', handleUpdate);
-    socket.on('moderation.approved', handleUpdate);
-
-    return () => {
-      socket.off('answerbook.status.changed', handleUpdate);
-      socket.off('moderation.returned', handleUpdate);
-      socket.off('moderation.approved', handleUpdate);
-    };
-  }, [id, queryClient]);
+    setAiError(null);
+  }, [activeQIndex]);
 
   // Load AnswerBook & Evaluation
   const { data, isLoading, isError, refetch } = useQuery<WorkspaceData>({
@@ -65,6 +52,44 @@ export function EvaluationWorkspacePage() {
   const evaluation = data?.evaluation;
   const exam = answerBook && typeof answerBook.examId === 'object' ? (answerBook.examId as unknown as Exam) : null;
   const examId = exam?._id || (typeof answerBook?.examId === 'string' ? answerBook.examId : '');
+
+  // Real-time synchronization
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    const handleUpdate = () => {
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      queryClient.invalidateQueries({ queryKey: ['my-papers'] });
+    };
+
+    const handleAiUpdated = (payload: { evaluationId?: string; answerBookId?: string; questionNumber?: number; aiAnalysis?: QuestionMarkAiAnalysis }) => {
+      if (payload && (payload.answerBookId === id || (evaluation && payload.evaluationId === evaluation._id))) {
+        if (payload.questionNumber && payload.aiAnalysis) {
+          const qNum = payload.questionNumber;
+          const ai = payload.aiAnalysis;
+          setMarksState((prev) =>
+            prev.map((m) =>
+              m.questionNumber === qNum ? { ...m, aiAnalysis: ai } : m
+            )
+          );
+        }
+        queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      }
+    };
+
+    socket.on('answerbook.status.changed', handleUpdate);
+    socket.on('moderation.returned', handleUpdate);
+    socket.on('moderation.approved', handleUpdate);
+    socket.on('evaluation.ai.updated', handleAiUpdated);
+
+    return () => {
+      socket.off('answerbook.status.changed', handleUpdate);
+      socket.off('moderation.returned', handleUpdate);
+      socket.off('moderation.approved', handleUpdate);
+      socket.off('evaluation.ai.updated', handleAiUpdated);
+    };
+  }, [id, evaluation?._id, queryClient]);
 
   // Load Exam Questions
   const { data: questions = [] } = useQuery<Question[]>({
@@ -231,11 +256,13 @@ export function EvaluationWorkspacePage() {
       return;
     }
 
+    const existingItem = marksState.find((m) => m.questionNumber === activeQuestion.questionNumber);
     const updatedItem: QuestionMarkItem = {
       questionNumber: activeQuestion.questionNumber,
       marks: numericMarks,
       status,
       comment: currentCommentInput,
+      ...(existingItem?.aiAnalysis ? { aiAnalysis: existingItem.aiAnalysis } : {}),
     };
 
     const updatedList = marksState.map((m) =>
@@ -248,6 +275,63 @@ export function EvaluationWorkspacePage() {
 
     setMarksState(updatedList);
     saveMarkMutation.mutate(updatedList);
+  };
+
+  // Mutation: Request AI assistance suggestion
+  const aiSuggestMutation = useMutation({
+    mutationFn: async ({ questionNumber, forceRefresh }: { questionNumber: number; forceRefresh?: boolean }) => {
+      if (!evaluation) throw new Error('No evaluation in progress');
+      setAiError(null);
+      const refreshQuery = forceRefresh ? '&forceRefresh=true' : '';
+      const res = await apiClient.post(
+        `/evaluations/${evaluation._id}/questions/${questionNumber}/ai-suggest?pageNumber=${currentPage}${refreshQuery}`
+      );
+      return { questionNumber, aiData: res.data.data as QuestionMarkAiAnalysis };
+    },
+    onSuccess: ({ questionNumber, aiData }) => {
+      setAiError(null);
+      setMarksState((prev) => {
+        const exists = prev.some((m) => m.questionNumber === questionNumber);
+        if (exists) {
+          return prev.map((m) =>
+            m.questionNumber === questionNumber ? { ...m, aiAnalysis: aiData } : m
+          );
+        }
+        return [
+          ...prev,
+          {
+            questionNumber,
+            marks: 0,
+            status: 'NOT_STARTED' as QuestionMarkStatus,
+            comment: '',
+            aiAnalysis: aiData,
+          },
+        ];
+      });
+      setIgnoredQuestions((prev) => ({ ...prev, [questionNumber]: false }));
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+    },
+    onError: (err: any) => {
+      const msg =
+        err.response?.data?.message ||
+        err.message ||
+        'AI assistance unavailable. Continue manual evaluation.';
+      setAiError(msg);
+    },
+  });
+
+  const handleUseSuggestion = (suggestedMarks: number) => {
+    setCurrentMarkInput(String(suggestedMarks));
+  };
+
+  const handleIgnoreSuggestion = (questionNumber: number) => {
+    setIgnoredQuestions((prev) => ({ ...prev, [questionNumber]: true }));
+  };
+
+  const handleRequestAi = (forceRefresh = false) => {
+    if (!evaluation || !activeQuestion) return;
+    setAiError(null);
+    aiSuggestMutation.mutate({ questionNumber: activeQuestion.questionNumber, forceRefresh });
   };
 
   const handleNextQuestion = () => {
@@ -335,6 +419,9 @@ export function EvaluationWorkspacePage() {
   const totalCalculatedMarks = marksState
     .filter((m) => m.status === 'MARKED' || m.status === 'FLAGGED')
     .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
+  const totalMaxMarks =
+    exam?.maximumMarks ||
+    activeQuestions.reduce((sum, q) => sum + (Number(q.maximumMarks) || 0), 0);
 
   return (
     <div style={{ margin: '-32px -48px -40px -48px', height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column' }}>
@@ -963,6 +1050,284 @@ export function EvaluationWorkspacePage() {
             )}
           </div>
 
+          {/* ============================================================ */}
+          {/* EVALNEXA COPILOT SECTION (Real Multimodal Rubric AI Assistant) */}
+          {/* ============================================================ */}
+          <div
+            style={{
+              background: '#ffffff',
+              border: '1px solid var(--border)',
+              borderLeft: '4px solid var(--gold)',
+              padding: '14px 16px',
+              marginBottom: 16,
+              fontFamily: 'Cambria',
+            }}
+          >
+            {/* Copilot Header */}
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                marginBottom: 10,
+                borderBottom: '1px solid var(--border)',
+                paddingBottom: 8,
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 13,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.12em',
+                  color: 'var(--navy)',
+                  fontWeight: 700,
+                }}
+              >
+                EVALNEXA COPILOT
+              </span>
+              <span
+                style={{
+                  fontSize: 10,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  padding: '2px 8px',
+                  background: 'rgba(212, 175, 55, 0.15)',
+                  color: 'var(--navy)',
+                  fontWeight: 700,
+                  border: '1px solid var(--gold)',
+                }}
+              >
+                AI SUGGESTION
+              </span>
+            </div>
+
+            {/* Loading State */}
+            {aiSuggestMutation.isPending && (
+              <div style={{ padding: '12px 0', textAlign: 'center', color: 'var(--navy)' }}>
+                <div style={{ fontSize: 14, fontStyle: 'italic', marginBottom: 4 }}>
+                  Evaluating Question {activeQuestion?.questionNumber} with EvalNexa AI…
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--charcoal)' }}>
+                  Analyzing answer script scan against grading rubric
+                </div>
+              </div>
+            )}
+
+            {/* Error / AI Unavailable State */}
+            {!aiSuggestMutation.isPending && (aiError || (activeMarkItem.aiAnalysis && activeMarkItem.aiAnalysis.confidence === 0)) && (
+              <div
+                style={{
+                  padding: '10px 12px',
+                  background: 'rgba(128, 0, 32, 0.05)',
+                  border: '1px solid var(--burgundy)',
+                  marginBottom: 8,
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--burgundy)', marginBottom: 4 }}>
+                  AI assistance unavailable. Continue manual evaluation.
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--charcoal)', lineHeight: 1.4 }}>
+                  {aiError || activeMarkItem.aiAnalysis?.reasoningSummary || 'The AI service could not evaluate this response.'}
+                </div>
+                {isInProgress && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ fontSize: 12, padding: '4px 10px', marginTop: 8 }}
+                    onClick={() => handleRequestAi(true)}
+                  >
+                    Retry AI Assistance
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Ignored State */}
+            {!aiSuggestMutation.isPending && !aiError && activeMarkItem.aiAnalysis && activeMarkItem.aiAnalysis.confidence > 0 && ignoredQuestions[activeQuestion?.questionNumber] && (
+              <div style={{ fontSize: 13, color: 'var(--charcoal)', padding: '4px 0' }}>
+                <div style={{ marginBottom: 8 }}>
+                  Suggestion dismissed for Question {activeQuestion?.questionNumber}.
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ fontSize: 12, padding: '4px 10px' }}
+                  onClick={() => setIgnoredQuestions((prev) => ({ ...prev, [activeQuestion?.questionNumber]: false }))}
+                >
+                  Show Suggestion
+                </button>
+              </div>
+            )}
+
+            {/* Valid AI Suggestion Display */}
+            {!aiSuggestMutation.isPending && !aiError && activeMarkItem.aiAnalysis && activeMarkItem.aiAnalysis.confidence > 0 && !ignoredQuestions[activeQuestion?.questionNumber] && (
+              <div>
+                {/* Score & Confidence */}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'baseline',
+                    marginBottom: 8,
+                    paddingBottom: 8,
+                    borderBottom: '1px dashed var(--border)',
+                  }}
+                >
+                  <div>
+                    <span style={{ fontSize: 13, color: 'var(--charcoal)' }}>
+                      Suggested:
+                    </span>{' '}
+                    <strong style={{ fontSize: 20, color: 'var(--navy)' }}>
+                      {activeMarkItem.aiAnalysis.suggestedMarks}
+                    </strong>
+                    <span style={{ fontSize: 14, color: 'var(--charcoal)' }}>
+                      {' '}/ {activeQuestion?.maximumMarks}
+                    </span>
+                  </div>
+                  <div>
+                    <span style={{ fontSize: 12, color: 'var(--charcoal)' }}>
+                      Confidence:
+                    </span>{' '}
+                    <strong style={{ fontSize: 15, color: 'var(--navy)' }}>
+                      {Math.round(activeMarkItem.aiAnalysis.confidence * 100)}%
+                    </strong>
+                  </div>
+                </div>
+
+                {/* Low confidence warning */}
+                {(activeMarkItem.aiAnalysis.confidence < 0.75 || activeMarkItem.aiAnalysis.needsHumanReview) && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: '#b45309',
+                      background: 'rgba(180, 83, 9, 0.1)',
+                      border: '1px solid #b45309',
+                      padding: '4px 8px',
+                      marginBottom: 10,
+                      textAlign: 'center',
+                    }}
+                  >
+                    Human review recommended.
+                  </div>
+                )}
+
+                {/* Criterion breakdown */}
+                {activeMarkItem.aiAnalysis.criteria && activeMarkItem.aiAnalysis.criteria.length > 0 && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.06em',
+                        color: 'var(--gold)',
+                        fontWeight: 700,
+                        marginBottom: 6,
+                      }}
+                    >
+                      Criterion breakdown:
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {activeMarkItem.aiAnalysis.criteria.map((crit, cIdx) => (
+                        <div
+                          key={cIdx}
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'baseline',
+                            fontSize: 13,
+                            color: 'var(--ink)',
+                          }}
+                        >
+                          <span style={{ flex: 1, paddingRight: 8 }}>{crit.name}</span>
+                          <strong style={{ color: 'var(--navy)', whiteSpace: 'nowrap' }}>
+                            {crit.awardedMarks}/{crit.maxMarks}
+                          </strong>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Missing concepts */}
+                {activeMarkItem.aiAnalysis.missingConcepts && activeMarkItem.aiAnalysis.missingConcepts.length > 0 && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.06em',
+                        color: 'var(--burgundy)',
+                        fontWeight: 700,
+                        marginBottom: 4,
+                      }}
+                    >
+                      Missing concepts:
+                    </div>
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: 'var(--charcoal)', lineHeight: 1.4 }}>
+                      {activeMarkItem.aiAnalysis.missingConcepts.map((concept, cIdx) => (
+                        <li key={cIdx}>- {concept}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Action buttons: [Use Suggestion] and [Ignore] */}
+                {isInProgress && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 12 }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{
+                        fontSize: 13,
+                        padding: '6px 10px',
+                        justifyContent: 'center',
+                        background: 'rgba(21, 128, 61, 0.1)',
+                        borderColor: '#15803d',
+                        color: '#15803d',
+                        fontWeight: 700,
+                      }}
+                      onClick={() => handleUseSuggestion(activeMarkItem.aiAnalysis!.suggestedMarks)}
+                    >
+                      Use Suggestion
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ fontSize: 13, padding: '6px 10px', justifyContent: 'center' }}
+                      onClick={() => handleIgnoreSuggestion(activeQuestion.questionNumber)}
+                    >
+                      Ignore
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Un-evaluated State */}
+            {!aiSuggestMutation.isPending && !aiError && !activeMarkItem.aiAnalysis && (
+              <div>
+                <p style={{ fontSize: 13, color: 'var(--charcoal)', margin: '0 0 10px 0', lineHeight: 1.4 }}>
+                  Request AI assistance to evaluate this answer script page against the marking rubric.
+                </p>
+                {isInProgress ? (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ width: '100%', fontSize: 13, padding: '8px 12px', justifyContent: 'center' }}
+                    onClick={() => handleRequestAi(false)}
+                  >
+                    ✦ Request AI Assistance
+                  </button>
+                ) : (
+                  <div style={{ fontSize: 12, color: 'var(--charcoal)', fontStyle: 'italic' }}>
+                    AI assistance is available while evaluation is in progress.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Marks Input & Comment */}
           {(isInProgress || isSubmitted) && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 16 }}>
@@ -1070,32 +1435,48 @@ export function EvaluationWorkspacePage() {
             </div>
           )}
 
-          {/* EVALNEXA COPILOT Slot (Strictly prompt compliant: compact, no fake scores) */}
-          <div
-            style={{
-              background: 'rgba(14,26,43,0.03)',
-              border: '1px dashed var(--border)',
-              padding: '12px 14px',
-              marginBottom: 16,
-            }}
-          >
-            <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--gold)', fontWeight: 700, marginBottom: 4 }}>
-              EVALNEXA COPILOT
-            </div>
-            <div style={{ fontSize: 14, color: 'var(--charcoal)' }}>
-              AI assistance not available.
-            </div>
-          </div>
+
 
           {/* Submission Roster & Calculation */}
           <div style={{ marginTop: 'auto', borderTop: '2px solid var(--border)', paddingTop: 16 }}>
+            {/* Quick Questions Review */}
+            <div
+              style={{
+                fontSize: 11,
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                color: 'var(--gold)',
+                fontWeight: 700,
+                marginBottom: 6,
+              }}
+            >
+              Questions
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '2px 8px',
+                fontSize: 12,
+                color: 'var(--charcoal)',
+                marginBottom: 10,
+                paddingBottom: 8,
+                borderBottom: '1px dashed var(--border)',
+              }}
+            >
+              <div>Evaluated: <strong style={{ color: 'var(--navy)' }}>{markedCount}/{activeQuestions.length}</strong></div>
+              <div>Not Attempted: <strong style={{ color: 'var(--navy)' }}>{notAttemptedCount}</strong></div>
+              <div>Flagged: <strong style={{ color: flaggedCount > 0 ? '#b45309' : 'var(--navy)' }}>{flaggedCount}</strong></div>
+              <div>Missing: <strong style={{ color: notStartedQuestions.length > 0 ? 'var(--burgundy)' : '#15803d' }}>{notStartedQuestions.length}</strong></div>
+            </div>
+
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
               <span style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--charcoal)', fontWeight: 700 }}>
                 TOTAL CALCULATED MARKS
               </span>
               <span style={{ fontSize: 26, fontWeight: 700, color: 'var(--navy)' }}>
                 {totalCalculatedMarks}
-                {exam && <span style={{ fontSize: 16, color: 'var(--charcoal)' }}> / {exam.maximumMarks}</span>}
+                <span style={{ fontSize: 16, color: 'var(--charcoal)' }}> / {totalMaxMarks}</span>
               </span>
             </div>
 
@@ -1165,78 +1546,151 @@ export function EvaluationWorkspacePage() {
               Submission Review Summary
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px dotted var(--border)', paddingBottom: 6 }}>
-                <span style={{ fontSize: 15, color: 'var(--charcoal)' }}>Script Code:</span>
-                <strong style={{ fontSize: 16, color: 'var(--navy)' }}>{answerBook.answerBookCode}</strong>
+            {/* Header Details */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: 'var(--charcoal)', marginBottom: 14, borderBottom: '1px dotted var(--border)', paddingBottom: 8 }}>
+              <span>Script: <strong style={{ color: 'var(--navy)' }}>{answerBook.answerBookCode}</strong></span>
+              <span>{exam ? exam.title : 'Examination'}</span>
+            </div>
+
+            {/* Exact Review Summary Box */}
+            <div
+              style={{
+                background: 'rgba(14,26,43,0.03)',
+                border: '1px solid var(--border)',
+                padding: '16px 20px',
+                marginBottom: 18,
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 14,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.1em',
+                  color: 'var(--navy)',
+                  fontWeight: 700,
+                  marginBottom: 12,
+                  borderBottom: '1px solid var(--border)',
+                  paddingBottom: 6,
+                }}
+              >
+                Questions
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px dotted var(--border)', paddingBottom: 6 }}>
-                <span style={{ fontSize: 15, color: 'var(--charcoal)' }}>Examination:</span>
-                <strong style={{ fontSize: 15, color: 'var(--navy)' }}>{exam ? exam.title : 'Examination'}</strong>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px dotted var(--border)', paddingBottom: 6 }}>
-                <span style={{ fontSize: 15, color: 'var(--charcoal)' }}>Questions Evaluated:</span>
-                <strong style={{ fontSize: 16, color: markedCount === activeQuestions.length ? '#15803d' : 'var(--navy)' }}>
-                  {markedCount} / {activeQuestions.length}
-                </strong>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px dotted var(--border)', paddingBottom: 6 }}>
-                <span style={{ fontSize: 15, color: 'var(--charcoal)' }}>Questions Not Attempted:</span>
-                <strong style={{ fontSize: 16, color: 'var(--charcoal)' }}>{notAttemptedCount}</strong>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px dotted var(--border)', paddingBottom: 6 }}>
-                <span style={{ fontSize: 15, color: 'var(--charcoal)' }}>Flags Recorded:</span>
-                <strong style={{ fontSize: 16, color: flaggedCount > 0 ? '#b45309' : 'var(--charcoal)' }}>
-                  {flaggedCount}
-                </strong>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '2px solid var(--border)', paddingBottom: 6 }}>
-                <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--navy)' }}>Total Final Marks:</span>
-                <strong style={{ fontSize: 22, fontWeight: 700, color: 'var(--navy)' }}>
-                  {totalCalculatedMarks} {exam && `/ ${exam.maximumMarks}`}
-                </strong>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 15 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--charcoal)' }}>Evaluated:</span>
+                  <strong style={{ color: markedCount === activeQuestions.length ? '#15803d' : 'var(--navy)' }}>
+                    {markedCount}/{activeQuestions.length}
+                  </strong>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--charcoal)' }}>Not Attempted:</span>
+                  <strong style={{ color: 'var(--charcoal)' }}>
+                    {notAttemptedCount}
+                  </strong>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'var(--charcoal)' }}>Flagged:</span>
+                  <strong style={{ color: flaggedCount > 0 ? '#b45309' : 'var(--charcoal)' }}>
+                    {flaggedCount}
+                  </strong>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: notStartedQuestions.length > 0 ? 'var(--burgundy)' : 'var(--charcoal)' }}>
+                    Missing:
+                  </span>
+                  <strong style={{ color: notStartedQuestions.length > 0 ? 'var(--burgundy)' : '#15803d' }}>
+                    {notStartedQuestions.length}
+                  </strong>
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'baseline',
+                    borderTop: '2px solid var(--border)',
+                    paddingTop: 10,
+                    marginTop: 6,
+                  }}
+                >
+                  <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--navy)' }}>Total:</span>
+                  <strong style={{ fontSize: 22, fontWeight: 700, color: 'var(--navy)' }}>
+                    {totalCalculatedMarks}/{totalMaxMarks}
+                  </strong>
+                </div>
               </div>
             </div>
 
-            {/* Unchecked Question Protection */}
-            {!allQuestionsAccounted && (
+            {/* If missing questions exist: show exactly which question numbers are missing */}
+            {!allQuestionsAccounted ? (
               <div
                 style={{
                   background: 'rgba(92,29,36,0.08)',
                   border: '1px solid var(--burgundy)',
-                  padding: '12px 16px',
+                  padding: '14px 16px',
                   color: 'var(--burgundy)',
                   fontSize: 14,
                   lineHeight: 1.5,
                   marginBottom: 16,
                 }}
               >
-                <div>
-                  <strong>Evaluation cannot be submitted yet.</strong>
+                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+                  Evaluation cannot be submitted yet.
                 </div>
-                <div style={{ marginTop: 4 }}>
-                  {notStartedQuestions.map((q) => `Q${q.questionNumber}`).join(', ')} has not been evaluated.
+                <div style={{ marginBottom: 8 }}>
+                  Missing question{notStartedQuestions.length > 1 ? 's' : ''}:{' '}
+                  <strong style={{ color: 'var(--burgundy)' }}>
+                    {notStartedQuestions.map((q) => `Q${q.questionNumber}`).join(', ')}
+                  </strong>{' '}
+                  must be evaluated before submission.
                 </div>
-                <button
-                  className="btn btn-secondary"
-                  style={{
-                    fontSize: 13,
-                    padding: '4px 12px',
-                    marginTop: 8,
-                    color: 'var(--burgundy)',
-                    borderColor: 'var(--burgundy)',
-                  }}
-                  onClick={() => {
-                    const firstUnchecked = notStartedQuestions[0];
-                    if (firstUnchecked) {
-                      const idx = activeQuestions.findIndex((q) => q.questionNumber === firstUnchecked.questionNumber);
-                      if (idx !== -1) setActiveQIndex(idx);
-                    }
-                    setShowSubmitModal(false);
-                  }}
-                >
-                  Go to {notStartedQuestions[0] ? `Q${notStartedQuestions[0].questionNumber}` : 'missing question'}
-                </button>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {notStartedQuestions.map((q) => {
+                    const idx = activeQuestions.findIndex((item) => item.questionNumber === q.questionNumber);
+                    return (
+                      <button
+                        key={q.questionNumber}
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{
+                          fontSize: 12,
+                          padding: '3px 10px',
+                          color: 'var(--burgundy)',
+                          borderColor: 'var(--burgundy)',
+                          fontWeight: 700,
+                        }}
+                        onClick={() => {
+                          if (idx !== -1) setActiveQIndex(idx);
+                          setShowSubmitModal(false);
+                        }}
+                      >
+                        Go to Q{q.questionNumber} →
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div
+                style={{
+                  background: 'rgba(21, 128, 61, 0.08)',
+                  border: '1px solid #15803d',
+                  padding: '12px 16px',
+                  color: '#15803d',
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                  marginBottom: 16,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <span style={{ fontSize: 18 }}>✓</span>
+                <span>All {activeQuestions.length} questions evaluated. Ready to submit to moderation.</span>
               </div>
             )}
 
@@ -1267,7 +1721,14 @@ export function EvaluationWorkspacePage() {
                 className="btn btn-primary"
                 disabled={!allQuestionsAccounted || submitMutation.isPending}
                 onClick={() => submitMutation.mutate()}
-                style={{ fontSize: 15, padding: '8px 20px', background: 'var(--navy)', color: '#ffffff' }}
+                style={{
+                  fontSize: 15,
+                  padding: '8px 20px',
+                  background: 'var(--navy)',
+                  color: '#ffffff',
+                  opacity: allQuestionsAccounted ? 1 : 0.5,
+                  cursor: allQuestionsAccounted ? 'pointer' : 'not-allowed',
+                }}
               >
                 {submitMutation.isPending ? 'Transmitting…' : 'SUBMIT EVALUATION'}
               </button>

@@ -159,6 +159,15 @@ export function generateAuthorizedMediaUrl(
   const resourceType = options.resourceType || 'image';
   const deliveryType = options.deliveryType || 'upload';
 
+  if (!cloudinary.config().cloud_name) {
+    cloudinary.config({
+      cloud_name: config.cloudinary.cloudName || process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: config.cloudinary.apiKey || process.env.CLOUDINARY_API_KEY,
+      api_secret: config.cloudinary.apiSecret || process.env.CLOUDINARY_API_SECRET,
+      secure: true,
+    });
+  }
+
   // Generate signed secure URL
   const secureUrl = cloudinary.url(publicId, {
     resource_type: resourceType,

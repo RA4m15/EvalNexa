@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../lib/apiClient';
 import { Evaluation, AnswerBook, Exam, User, Question, QuestionMarkItem } from '@evalnexa/types';
 import { StatusBadge } from '../components/StatusBadge';
+import { getSocket } from '../lib/socket';
 
 interface ModerationDetailResponse {
   evaluation: Evaluation;
@@ -59,6 +60,48 @@ export function ReviewDetailPage() {
   const exam = ab && typeof ab.examId === 'object' ? (ab.examId as unknown as Exam) : null;
   const examiner = typeof evaluation?.examinerId === 'object' ? (evaluation.examinerId as unknown as User) : null;
   const examId = exam?._id || (typeof ab?.examId === 'string' ? ab.examId : '');
+
+  // Real-time synchronization with Socket.IO
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    const handleRealtimeUpdate = (payload?: any) => {
+      const payloadEvalId = payload?.evaluation?._id || payload?.evaluationId || payload?.id;
+      const payloadAbId = payload?.answerBook?._id || payload?.answerBookId;
+      const currentAbId = ab?._id?.toString();
+
+      if (
+        !payload ||
+        !payloadEvalId ||
+        payloadEvalId === id ||
+        payloadEvalId === evaluation?._id?.toString() ||
+        (payloadAbId && currentAbId && payloadAbId === currentAbId)
+      ) {
+        queryClient.invalidateQueries({ queryKey: ['moderation-detail', id] });
+        queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+        queryClient.invalidateQueries({ queryKey: ['moderation-stats'] });
+        if (ab?._id) {
+          queryClient.invalidateQueries({ queryKey: ['mod-paper-pages', ab._id] });
+          queryClient.invalidateQueries({ queryKey: ['mod-paper-page-media', ab._id] });
+        }
+      }
+    };
+
+    socket.on('evaluation.submitted', handleRealtimeUpdate);
+    socket.on('evaluation.updated', handleRealtimeUpdate);
+    socket.on('moderation.approved', handleRealtimeUpdate);
+    socket.on('moderation.returned', handleRealtimeUpdate);
+    socket.on('answerbook.status.changed', handleRealtimeUpdate);
+
+    return () => {
+      socket.off('evaluation.submitted', handleRealtimeUpdate);
+      socket.off('evaluation.updated', handleRealtimeUpdate);
+      socket.off('moderation.approved', handleRealtimeUpdate);
+      socket.off('moderation.returned', handleRealtimeUpdate);
+      socket.off('answerbook.status.changed', handleRealtimeUpdate);
+    };
+  }, [id, evaluation?._id, ab?._id, queryClient]);
 
   // 2. Fetch Questions & Rubrics for context
   const { data: questions = [] } = useQuery<Question[]>({
@@ -116,13 +159,13 @@ export function ReviewDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
       queryClient.invalidateQueries({ queryKey: ['moderation-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['moderation-detail', id] });
       setShowApproveModal(false);
       navigate('/review');
     },
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message || 'Approval failed';
       setActionError(msg);
-      setShowApproveModal(false);
     },
   });
 
@@ -134,13 +177,13 @@ export function ReviewDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
       queryClient.invalidateQueries({ queryKey: ['moderation-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['moderation-detail', id] });
       setShowReturnModal(false);
       navigate('/review');
     },
     onError: (err: unknown) => {
       const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message || 'Return failed';
       setActionError(msg);
-      setShowReturnModal(false);
     },
   });
 
@@ -186,6 +229,8 @@ export function ReviewDetailPage() {
         deterministicIssues.push(`Question ${i} has not been evaluated.`);
       }
     }
+  } else if (!evaluation.questionMarks || evaluation.questionMarks.length === 0) {
+    deterministicIssues.push('No question marks recorded for this evaluation.');
   }
 
   // Arithmetic and bounds check
@@ -193,8 +238,14 @@ export function ReviewDetailPage() {
   (evaluation.questionMarks || []).forEach((qm) => {
     computedSum += qm.marks || 0;
     const matchQ = questions.find((q) => q.questionNumber === qm.questionNumber);
+    if (qm.marks < 0) {
+      deterministicIssues.push(`Q${qm.questionNumber} has negative marks (${qm.marks}).`);
+    }
     if (matchQ && qm.marks > matchQ.maximumMarks) {
       deterministicIssues.push(`Q${qm.questionNumber} mark (${qm.marks}) exceeds rubric maximum (${matchQ.maximumMarks}).`);
+    }
+    if (qm.status === 'NOT_ATTEMPTED' && qm.marks > 0) {
+      deterministicIssues.push(`Q${qm.questionNumber} marked as NOT_ATTEMPTED cannot be awarded marks (${qm.marks}).`);
     }
   });
 
@@ -215,6 +266,45 @@ export function ReviewDetailPage() {
   // Selected question mark details
   const selectedQuestionMarks = selectedQuestionNumber !== null ? questionMarksMap.get(selectedQuestionNumber) : null;
   const selectedQuestionRubric = selectedQuestionNumber !== null ? questions.find((q) => q.questionNumber === selectedQuestionNumber) : null;
+
+  // Flagged questions identified by examiner
+  const flaggedQuestions = (evaluation.questionMarks || []).filter((q) => q.status === 'FLAGGED');
+
+  // Modal Open/Close and Form Validation Handlers
+  const handleOpenApproveModal = () => {
+    if (!isDeterministicValid) return;
+    setActionError('');
+    setShowApproveModal(true);
+  };
+
+  const handleCloseApproveModal = () => {
+    if (approveMutation.isPending) return;
+    setActionError('');
+    setShowApproveModal(false);
+  };
+
+  const handleOpenReturnModal = () => {
+    setActionError('');
+    setShowReturnModal(true);
+  };
+
+  const handleCloseReturnModal = () => {
+    if (returnMutation.isPending) return;
+    setActionError('');
+    setShowReturnModal(false);
+  };
+
+  const returnReasonTrimmed = returnReason.trim();
+  const isReturnReasonValid = returnReasonTrimmed.length >= 5;
+
+  const handleReturnSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isReturnReasonValid) {
+      setActionError('Please provide a reason of at least 5 characters explaining what needs revision.');
+      return;
+    }
+    returnMutation.mutate(returnReasonTrimmed);
+  };
 
   return (
     <div style={{ maxWidth: 1600, margin: '0 auto' }}>
@@ -875,7 +965,7 @@ export function ReviewDetailPage() {
                     type="button"
                     className="btn btn-primary"
                     disabled={!isDeterministicValid || approveMutation.isPending}
-                    onClick={() => setShowApproveModal(true)}
+                    onClick={handleOpenApproveModal}
                     style={{
                       width: '100%',
                       justifyContent: 'center',
@@ -898,7 +988,7 @@ export function ReviewDetailPage() {
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => setShowReturnModal(true)}
+                    onClick={handleOpenReturnModal}
                     style={{
                       width: '100%',
                       justifyContent: 'center',
@@ -962,7 +1052,7 @@ export function ReviewDetailPage() {
       {/* APPROVE CONFIRMATION MODAL */}
       {/* ============================================================ */}
       {showApproveModal && (
-        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && setShowApproveModal(false)}>
+        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && handleCloseApproveModal()}>
           <div className="modal" style={{ maxWidth: 500 }}>
             <div className="modal__header">
               <div>
@@ -971,9 +1061,44 @@ export function ReviewDetailPage() {
                   Approve this evaluation?
                 </div>
               </div>
-              <button className="modal__close" onClick={() => setShowApproveModal(false)}>✕</button>
+              <button className="modal__close" onClick={handleCloseApproveModal}>✕</button>
             </div>
             <div className="modal__body">
+              {actionError && (
+                <div
+                  style={{
+                    background: 'var(--status-returned-bg)',
+                    color: 'var(--status-returned-text)',
+                    padding: 'var(--space-2) var(--space-3)',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid rgba(180,40,40,0.3)',
+                    fontSize: 13,
+                    marginBottom: 'var(--space-3)',
+                    fontWeight: 600,
+                  }}
+                >
+                  ⚠ {actionError}
+                </div>
+              )}
+
+              {flaggedQuestions.length > 0 && (
+                <div
+                  style={{
+                    background: 'rgba(255, 180, 0, 0.12)',
+                    border: '1px solid rgba(200, 140, 0, 0.4)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: 'var(--space-2) var(--space-3)',
+                    fontSize: 12,
+                    color: 'rgb(140, 90, 0)',
+                    marginBottom: 'var(--space-3)',
+                  }}
+                >
+                  <strong>Advisory Notice:</strong> The examiner flagged{' '}
+                  <strong>{flaggedQuestions.map((q) => `Q${q.questionNumber}`).join(', ')}</strong> for moderation review.
+                  By approving, you certify that these questions have been inspected and confirmed.
+                </div>
+              )}
+
               <p style={{ fontSize: 14, color: 'var(--text-muted)', marginBottom: 'var(--space-4)' }}>
                 Approving this evaluation will certify the awarded marks, finalize custody in MongoDB, and synchronize with the University Control Center and Results ledger.
               </p>
@@ -986,17 +1111,17 @@ export function ReviewDetailPage() {
               </div>
             </div>
             <div className="modal__footer">
-              <button type="button" className="btn btn-secondary" onClick={() => setShowApproveModal(false)}>
+              <button type="button" className="btn btn-secondary" disabled={approveMutation.isPending} onClick={handleCloseApproveModal}>
                 Cancel
               </button>
               <button
                 type="button"
                 className="btn btn-primary"
-                disabled={approveMutation.isPending}
+                disabled={approveMutation.isPending || !isDeterministicValid}
                 onClick={() => approveMutation.mutate()}
                 style={{ fontWeight: 700, fontFamily: 'Cambria, serif' }}
               >
-                {approveMutation.isPending ? 'Certifying…' : 'CONFIRM APPROVAL'}
+                {approveMutation.isPending ? 'Certifying Evaluation…' : 'CONFIRM APPROVAL'}
               </button>
             </div>
           </div>
@@ -1007,7 +1132,7 @@ export function ReviewDetailPage() {
       {/* RETURN FOR REVISION MODAL (Reason Required) */}
       {/* ============================================================ */}
       {showReturnModal && (
-        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && setShowReturnModal(false)}>
+        <div className="modal-backdrop" onClick={(e) => e.target === e.currentTarget && handleCloseReturnModal()}>
           <div className="modal" style={{ maxWidth: 540 }}>
             <div className="modal__header">
               <div>
@@ -1016,16 +1141,27 @@ export function ReviewDetailPage() {
                   Return Evaluation to Examiner
                 </div>
               </div>
-              <button className="modal__close" onClick={() => setShowReturnModal(false)}>✕</button>
+              <button className="modal__close" onClick={handleCloseReturnModal}>✕</button>
             </div>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!returnReason.trim()) return;
-                returnMutation.mutate(returnReason);
-              }}
-            >
+            <form onSubmit={handleReturnSubmit}>
               <div className="modal__body">
+                {actionError && (
+                  <div
+                    style={{
+                      background: 'var(--status-returned-bg)',
+                      color: 'var(--status-returned-text)',
+                      padding: 'var(--space-2) var(--space-3)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid rgba(180,40,40,0.3)',
+                      fontSize: 13,
+                      marginBottom: 'var(--space-3)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    ⚠ {actionError}
+                  </div>
+                )}
+
                 <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 'var(--space-3)' }}>
                   State the specific discrepancy, missing question coverage, or scoring clarification required from {examiner?.name || 'the examiner'}.
                 </p>
@@ -1044,7 +1180,10 @@ export function ReviewDetailPage() {
                       <button
                         key={preset}
                         type="button"
-                        onClick={() => setReturnReason(preset)}
+                        onClick={() => {
+                          setReturnReason(preset);
+                          if (actionError) setActionError('');
+                        }}
                         style={{
                           fontSize: 11,
                           padding: '3px 8px',
@@ -1061,31 +1200,46 @@ export function ReviewDetailPage() {
                 </div>
 
                 <div className="form-field">
-                  <label className="form-label" style={{ fontSize: 12 }}>
-                    Return Justification Reason <span className="required">*</span>
-                  </label>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                    <label className="form-label" style={{ fontSize: 12, margin: 0 }}>
+                      Return Justification Reason <span className="required">*</span>
+                    </label>
+                    <span
+                      className="label-mono"
+                      style={{
+                        fontSize: 11,
+                        color: returnReasonTrimmed.length >= 5 ? 'var(--status-approved-text)' : 'var(--text-muted)',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {returnReasonTrimmed.length} / 5 chars min
+                    </span>
+                  </div>
                   <textarea
                     className="form-input"
                     rows={4}
                     required
-                    placeholder="Enter explicit review reason for examiner…"
+                    placeholder="Enter explicit review reason for examiner (at least 5 characters)…"
                     value={returnReason}
-                    onChange={(e) => setReturnReason(e.target.value)}
+                    onChange={(e) => {
+                      setReturnReason(e.target.value);
+                      if (actionError) setActionError('');
+                    }}
                     style={{ fontSize: 13, fontFamily: 'Cambria, serif' }}
                   />
                 </div>
               </div>
               <div className="modal__footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowReturnModal(false)}>
+                <button type="button" className="btn btn-secondary" disabled={returnMutation.isPending} onClick={handleCloseReturnModal}>
                   Cancel
                 </button>
                 <button
                   type="submit"
                   className="btn btn-primary"
-                  disabled={!returnReason.trim() || returnMutation.isPending}
+                  disabled={!isReturnReasonValid || returnMutation.isPending}
                   style={{ background: 'var(--status-returned-text)', borderColor: 'var(--status-returned-text)' }}
                 >
-                  {returnMutation.isPending ? 'Remanding…' : 'CONFIRM RETURN FOR REVISION'}
+                  {returnMutation.isPending ? 'Remanding Evaluation…' : 'CONFIRM RETURN FOR REVISION'}
                 </button>
               </div>
             </form>

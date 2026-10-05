@@ -47,8 +47,43 @@ export const createAnswerBookSchema = z.object({
   studentCode: z.string().min(2, 'Student code is required'),
   pageCount: z.number().int().positive().default(1),
   scanBatch: z.string().optional(),
+  status: z
+    .enum([
+      'READY',
+      'ASSIGNED',
+      'IN_PROGRESS',
+      'SUBMITTED',
+      'UNDER_REVIEW',
+      'APPROVED',
+      'RETURNED',
+      'FINALIZED',
+    ])
+    .optional(),
+  processingStatus: z
+    .enum([
+      'RECEIVED',
+      'PROCESSING',
+      'QUALITY_REVIEW',
+      'RESCAN_REQUIRED',
+      'OCR_PROCESSING',
+      'FINALIZING',
+      'FINALIZED',
+      'READY_FOR_EVALUATION',
+      'COMPLETED',
+      'ERROR',
+    ])
+    .optional(),
   qualityStatus: z
-    .enum(['READY', 'PROCESSING', 'QUALITY_REVIEW', 'RESCAN_REQUIRED', 'VERIFIED'])
+    .enum([
+      'PENDING',
+      'PASSED',
+      'REVIEW_REQUIRED',
+      'RESCAN_REQUIRED',
+      'VERIFIED',
+      'READY',
+      'PROCESSING',
+      'QUALITY_REVIEW',
+    ])
     .optional(),
   pdfUrl: z.string().optional(),
 });
@@ -62,6 +97,29 @@ export const questionMarkSchema = z.object({
   marks: z.number().min(0),
   status: z.enum(['NOT_STARTED', 'MARKED', 'FLAGGED', 'NOT_ATTEMPTED']),
   comment: z.string().optional(),
+  aiAnalysis: z
+    .object({
+      suggestedMarks: z.number().optional(),
+      minMarks: z.number().optional(),
+      maxMarks: z.number().optional(),
+      confidence: z.number().optional(),
+      needsHumanReview: z.boolean().optional(),
+      criteria: z
+        .array(
+          z.object({
+            name: z.string().optional(),
+            maxMarks: z.number().optional(),
+            awardedMarks: z.number().optional(),
+            evidence: z.string().optional(),
+          })
+        )
+        .optional(),
+      missingConcepts: z.array(z.string()).optional(),
+      reasoningSummary: z.string().optional(),
+      generatedAt: z.union([z.string(), z.date()]).optional(),
+      model: z.string().optional(),
+    })
+    .optional(),
 });
 
 export const updateEvaluationSchema = z.object({
@@ -93,6 +151,10 @@ export const createQuestionSchema = z.object({
     )
     .optional()
     .default([]),
+  referenceAnswer: z.string().optional(),
+  keyConcepts: z.array(z.string()).optional(),
+  gradingNotes: z.string().optional(),
+  evaluationLanguage: z.string().optional(),
 });
 
 export const updateQuestionSchema = z.object({
@@ -107,4 +169,8 @@ export const updateQuestionSchema = z.object({
       })
     )
     .optional(),
+  referenceAnswer: z.string().optional(),
+  keyConcepts: z.array(z.string()).optional(),
+  gradingNotes: z.string().optional(),
+  evaluationLanguage: z.string().optional(),
 });

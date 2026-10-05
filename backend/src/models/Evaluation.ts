@@ -1,11 +1,30 @@
 import mongoose, { Document, Schema } from 'mongoose';
 import { EvaluationStatus } from '@evalnexa/types';
 
+export interface IEvaluationQuestionAiAnalysis {
+  suggestedMarks: number;
+  minMarks: number;
+  maxMarks: number;
+  confidence: number;
+  needsHumanReview: boolean;
+  criteria: Array<{
+    name: string;
+    maxMarks: number;
+    awardedMarks: number;
+    evidence: string;
+  }>;
+  missingConcepts: string[];
+  reasoningSummary: string;
+  generatedAt: Date;
+  model: string;
+}
+
 export interface IEvaluationQuestionMark {
   questionNumber: number;
   marks: number;
   status: 'NOT_STARTED' | 'MARKED' | 'FLAGGED' | 'NOT_ATTEMPTED';
   comment?: string;
+  aiAnalysis?: IEvaluationQuestionAiAnalysis;
 }
 
 export interface IEvaluation extends Document {
@@ -58,6 +77,31 @@ const EvaluationSchema = new Schema<IEvaluation>(
           default: 'NOT_STARTED',
         },
         comment: { type: String, trim: true },
+        aiAnalysis: {
+          type: new Schema(
+            {
+              suggestedMarks: { type: Number },
+              minMarks: { type: Number },
+              maxMarks: { type: Number },
+              confidence: { type: Number },
+              needsHumanReview: { type: Boolean },
+              criteria: [
+                {
+                  name: { type: String },
+                  maxMarks: { type: Number },
+                  awardedMarks: { type: Number },
+                  evidence: { type: String },
+                },
+              ],
+              missingConcepts: { type: [String], default: undefined },
+              reasoningSummary: { type: String },
+              generatedAt: { type: Date },
+              model: { type: String },
+            },
+            { _id: false }
+          ),
+          default: undefined,
+        },
       },
     ],
     startedAt: { type: Date },
@@ -65,5 +109,15 @@ const EvaluationSchema = new Schema<IEvaluation>(
   },
   { timestamps: true }
 );
+
+// Authoritative totalMarks calculation: always recalculate from questionMarks
+EvaluationSchema.pre('validate', function (next) {
+  if (this.questionMarks && Array.isArray(this.questionMarks)) {
+    this.totalMarks = this.questionMarks
+      .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
+      .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
+  }
+  next();
+});
 
 export const Evaluation = mongoose.model<IEvaluation>('Evaluation', EvaluationSchema);

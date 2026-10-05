@@ -14,6 +14,7 @@ import evaluationsRoutes from './routes/evaluations.routes';
 import moderationRoutes from './routes/moderation.routes';
 import questionsRoutes from './routes/questions.routes';
 import auditRoutes from './routes/audit.routes';
+import resultsRoutes from './routes/results.routes';
 
 const app = express();
 
@@ -44,6 +45,7 @@ app.use('/api/answer-books', answerBooksRoutes);
 app.use('/api/evaluations', evaluationsRoutes);
 app.use('/api/moderation', moderationRoutes);
 app.use('/api/moderations', moderationRoutes);
+app.use('/api/results', resultsRoutes);
 app.use('/api/audit-logs', auditRoutes);
 
 // Error handling
