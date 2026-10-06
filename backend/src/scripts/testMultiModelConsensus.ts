@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { MultiModelOrchestrator } from '../services/ai/MultiModelOrchestrator';
 import { SingleModelEvaluationResult } from '../services/ai/types';
 import { EvaluationAssistantInput } from '../services/EvaluationAssistantService';
