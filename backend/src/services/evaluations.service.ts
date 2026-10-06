@@ -9,6 +9,7 @@ import { logAuditAction } from './audit.service';
 import { emitToAll, emitToRole } from '../sockets';
 import { generateAuthorizedMediaUrl } from './media.service';
 import { EvaluationAssistantService } from './EvaluationAssistantService';
+import { areEntityIdsEqual } from '../utils/identity';
 import fs from 'fs';
 import path from 'path';
 
@@ -355,7 +356,7 @@ export async function beginEvaluation(id: string, examinerId: string) {
     throw error;
   }
 
-  if (answerBook.assignedExaminerId?.toString() !== examinerId) {
+  if (!areEntityIdsEqual(answerBook.assignedExaminerId, examinerId)) {
     const error: any = new Error('You are not assigned to this answer book');
     error.status = 403;
     error.code = 'NOT_ASSIGNED';
@@ -426,10 +427,7 @@ export async function updateEvaluationMarks(
     throw error;
   }
 
-  if (
-    evaluation.examinerId.toString() !== examinerId &&
-    (evaluation.examinerId as any)._id?.toString() !== examinerId
-  ) {
+  if (!areEntityIdsEqual(evaluation.examinerId, examinerId)) {
     const error: any = new Error('Access denied: You do not own this evaluation');
     error.status = 403;
     error.code = 'ACCESS_DENIED';
@@ -514,10 +512,7 @@ export async function submitEvaluationFinal(
     throw error;
   }
 
-  if (
-    evaluation.examinerId.toString() !== examinerId &&
-    (evaluation.examinerId as any)._id?.toString() !== examinerId
-  ) {
+  if (!areEntityIdsEqual(evaluation.examinerId, examinerId)) {
     const error: any = new Error('Access denied: You do not own this evaluation');
     error.status = 403;
     error.code = 'ACCESS_DENIED';
