@@ -10,6 +10,7 @@ import {
 import { authenticate, authorize } from '../middleware/auth';
 import { validate } from '../middleware/validate';
 import { updateEvaluationSchema, submitEvaluationSchema } from '../validators/schemas';
+import { aiAssistantLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 
@@ -21,24 +22,28 @@ router.post('/:id/start', authorize('EXAMINER'), startEvaluation);
 router.patch('/:id', authorize('EXAMINER'), validate(updateEvaluationSchema), updateEvaluation);
 router.post('/:id/submit', authorize('EXAMINER'), validate(submitEvaluationSchema), submitEvaluation);
 
-// AI-Assisted Question Evaluation Copilot
+// AI-Assisted Question Evaluation Copilot (with rate limiting and RBAC protection)
 router.get(
   '/:id/questions/:questionNumber/suggest',
+  aiAssistantLimiter,
   authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
   getAIEvaluationSuggestion
 );
 router.post(
   '/:id/questions/:questionNumber/suggest',
+  aiAssistantLimiter,
   authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
   getAIEvaluationSuggestion
 );
 router.post(
   '/:id/questions/:questionNumber/ai-suggest',
+  aiAssistantLimiter,
   authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
   getAIEvaluationSuggestion
 );
 router.post(
   '/:evaluationId/questions/:questionNumber/ai-suggest',
+  aiAssistantLimiter,
   authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
   getAIEvaluationSuggestion
 );

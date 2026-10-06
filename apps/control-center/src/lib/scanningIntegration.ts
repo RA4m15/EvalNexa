@@ -9,7 +9,7 @@
 import { QualityStatus, AnswerBookStatus } from '@evalnexa/types';
 
 export interface PageQualityDiagnostics {
-  status: 'PASSED' | 'RESCAN_REQUIRED' | 'PENDING';
+  status: 'PASSED' | 'RESCAN_REQUIRED' | 'PENDING' | 'HUMAN_REVIEW';
   blurDetected?: boolean;
   sharpnessScore?: number;
   orientation?: string;
@@ -124,7 +124,12 @@ export async function processPageWithOpenCVService(
       success: true,
       serviceAvailable: true,
       diagnostics: {
-        status: data.qualityStatus === 'PASSED' ? 'PASSED' : 'RESCAN_REQUIRED',
+        status:
+          data.qualityStatus === 'PASSED'
+            ? 'PASSED'
+            : data.qualityStatus === 'HUMAN_REVIEW'
+            ? 'HUMAN_REVIEW'
+            : 'RESCAN_REQUIRED',
         blurDetected: Boolean(data.blurDetected),
         sharpnessScore: typeof data.sharpness === 'number' ? data.sharpness : undefined,
         orientation: data.orientation || 'NORMAL',
