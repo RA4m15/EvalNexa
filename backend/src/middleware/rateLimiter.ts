@@ -11,3 +11,19 @@ export const loginLimiter = rateLimit({
     code: 'RATE_LIMIT_EXCEEDED',
   },
 });
+
+export const aiAssistantLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 AI copilot requests per minute per user/IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => {
+    return req.user?._id?.toString() || req.ip || 'anonymous';
+  },
+  message: {
+    success: false,
+    message: 'AI Evaluation Assistant rate limit reached. Please wait a moment before requesting further AI suggestions.',
+    code: 'AI_RATE_LIMIT_EXCEEDED',
+  },
+});
+

@@ -16,7 +16,7 @@ interface CapturedPageItem {
   pageNumber: number;
   previewUrl: string;
   blob: Blob;
-  qualityStatus: 'PASSED' | 'RESCAN_REQUIRED';
+  qualityStatus: 'PASSED' | 'RESCAN_REQUIRED' | 'HUMAN_REVIEW';
   diagnostics?: PageQualityDiagnostics;
   processedImageUrl?: string;
 }
@@ -50,7 +50,7 @@ export function ScanCenterPage() {
     pageNumber: number;
     previewUrl: string;
     blob: Blob;
-    qualityStatus: 'PASSED' | 'RESCAN_REQUIRED';
+    qualityStatus: 'PASSED' | 'RESCAN_REQUIRED' | 'HUMAN_REVIEW';
     diagnostics?: PageQualityDiagnostics;
     serviceUnavailableNotice?: string;
     processedImageUrl?: string;
@@ -299,7 +299,12 @@ export function ScanCenterPage() {
           pageNumber: nextPgNum,
           previewUrl: finalPreviewUrl,
           blob: finalBlob,
-          qualityStatus: finalDiagnostics.status === 'RESCAN_REQUIRED' ? 'RESCAN_REQUIRED' : 'PASSED',
+          qualityStatus:
+            finalDiagnostics.status === 'RESCAN_REQUIRED'
+              ? 'RESCAN_REQUIRED'
+              : finalDiagnostics.status === 'HUMAN_REVIEW'
+              ? 'HUMAN_REVIEW'
+              : 'PASSED',
           diagnostics: finalDiagnostics,
           processedImageUrl,
         });
@@ -346,7 +351,12 @@ export function ScanCenterPage() {
         pageNumber: nextPgNum,
         previewUrl: finalPreviewUrl,
         blob: finalBlob,
-        qualityStatus: procResult.diagnostics.status === 'RESCAN_REQUIRED' ? 'RESCAN_REQUIRED' : 'PASSED',
+        qualityStatus:
+          procResult.diagnostics.status === 'RESCAN_REQUIRED'
+            ? 'RESCAN_REQUIRED'
+            : procResult.diagnostics.status === 'HUMAN_REVIEW'
+            ? 'HUMAN_REVIEW'
+            : 'PASSED',
         diagnostics: procResult.diagnostics,
         processedImageUrl,
       });
@@ -1026,10 +1036,18 @@ export function ScanCenterPage() {
             </div>
             <span
               className={`status-badge ${
-                currentPendingPage.qualityStatus === 'PASSED' ? 'status-badge--approved' : 'status-badge--returned'
+                currentPendingPage.qualityStatus === 'PASSED'
+                  ? 'status-badge--approved'
+                  : currentPendingPage.qualityStatus === 'HUMAN_REVIEW'
+                  ? 'status-badge--review'
+                  : 'status-badge--returned'
               }`}
             >
-              {currentPendingPage.qualityStatus === 'PASSED' ? '✓ QUALITY PASSED' : '⚠ RESCAN REQUIRED'}
+              {currentPendingPage.qualityStatus === 'PASSED'
+                ? '✓ QUALITY PASSED'
+                : currentPendingPage.qualityStatus === 'HUMAN_REVIEW'
+                ? '⚠ HUMAN REVIEW'
+                : '⚠ RESCAN REQUIRED'}
             </span>
           </div>
 
@@ -1076,7 +1094,17 @@ export function ScanCenterPage() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', marginBottom: 'var(--space-4)' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--parchment-panel)', borderRadius: 2 }}>
                       <span style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>Sharpness / Clarity:</span>
-                      <strong style={{ fontSize: 'var(--text-metadata)', color: currentPendingPage.qualityStatus === 'PASSED' ? 'var(--status-approved-text)' : 'var(--status-returned-text)' }}>
+                      <strong
+                        style={{
+                          fontSize: 'var(--text-metadata)',
+                          color:
+                            currentPendingPage.qualityStatus === 'PASSED'
+                              ? 'var(--status-approved-text)'
+                              : currentPendingPage.qualityStatus === 'HUMAN_REVIEW'
+                              ? 'var(--status-review-text)'
+                              : 'var(--status-returned-text)',
+                        }}
+                      >
                         {currentPendingPage.diagnostics?.sharpnessScore !== undefined
                           ? `${currentPendingPage.diagnostics.sharpnessScore} / 100`
                           : 'Verified'}
@@ -1119,6 +1147,20 @@ export function ScanCenterPage() {
                   </div>
                 )}
 
+                {/* Human Review Banner if Geometry Uncertain */}
+                {currentPendingPage.qualityStatus === 'HUMAN_REVIEW' && (
+                  <div className="attention-item attention-item--warning" style={{ marginBottom: 'var(--space-4)' }}>
+                    <div className="attention-item__icon">ℹ</div>
+                    <div className="attention-item__content">
+                      <div className="attention-item__title">Human Verification Required</div>
+                      <div className="attention-item__desc">
+                        {currentPendingPage.diagnostics?.reason ||
+                          'Document detected, but page boundaries could not be reliably resolved. Human verification required.'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Step 3 Action Buttons (Section 9 & 11) */}
                 <div style={{ display: 'flex', gap: 'var(--space-3)', marginTop: 'var(--space-6)' }}>
                   <button className="btn btn-secondary" onClick={handleRecapturePage} style={{ flex: 1 }}>
@@ -1131,7 +1173,9 @@ export function ScanCenterPage() {
                     disabled={currentPendingPage.qualityStatus === 'RESCAN_REQUIRED'}
                     style={{ flex: 1.2 }}
                   >
-                    ✓ Accept Page 0{currentPendingPage.pageNumber}
+                    {currentPendingPage.qualityStatus === 'HUMAN_REVIEW'
+                      ? `✓ Verify & Accept Page 0${currentPendingPage.pageNumber}`
+                      : `✓ Accept Page 0${currentPendingPage.pageNumber}`}
                   </button>
                 </div>
               </div>

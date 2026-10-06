@@ -1,4 +1,4 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { geminiManager } from '../config/gemini';
 import { z } from 'zod';
 import { Evaluation } from '../models/Evaluation';
 import { AnswerBook } from '../models/AnswerBook';
@@ -26,6 +26,7 @@ export interface EvaluationAssistantResult {
   criteria: EvaluationAssistantCriteriaSuggestion[];
   missingConcepts: string[];
   reasoningSummary: string;
+  model?: string;
 }
 
 export interface EvaluationAssistantInput {
@@ -39,6 +40,7 @@ export interface EvaluationAssistantInput {
   keyConcepts?: string[];
   gradingNotes?: string;
   studentAnswerImage?: string | Buffer;
+  studentAnswerImages?: Array<string | Buffer>;
   studentAnswerImageMimeType?: string;
   ocrText?: string;
   ocrConfidence?: number | null;
@@ -248,46 +250,74 @@ export function validateAndEnforceAssistantConstraints(
 ): EvaluationAssistantResult {
   const result = evaluationAssistantResultSchema.parse(raw);
 
-  // 1. suggestedMarks bounds
+  // 1. suggestedMarks bounds [0, maximumMarks]
   if (result.suggestedMarks < 0 || result.suggestedMarks > input.maximumMarks) {
     throw new Error(
       `AI suggestedMarks (${result.suggestedMarks}) out of bounds [0, ${input.maximumMarks}]`
     );
   }
 
-  // 2. minMarks <= suggestedMarks
-  if (result.minMarks > result.suggestedMarks) {
+  // 2. minMarks bounds [0, suggestedMarks]
+  if (result.minMarks < 0 || result.minMarks > result.suggestedMarks) {
     throw new Error(
-      `AI minMarks (${result.minMarks}) cannot exceed suggestedMarks (${result.suggestedMarks})`
+      `AI minMarks (${result.minMarks}) invalid. Must be within [0, suggestedMarks (${result.suggestedMarks})]`
     );
   }
 
-  // 3. suggestedMarks <= maxMarks
+  // 3. suggestedMarks <= maxMarks and maxMarks <= input.maximumMarks
   if (result.suggestedMarks > result.maxMarks) {
     throw new Error(
       `AI suggestedMarks (${result.suggestedMarks}) cannot exceed maxMarks (${result.maxMarks})`
     );
   }
-
-  // 4. maxMarks <= question maximum
   if (result.maxMarks > input.maximumMarks) {
     throw new Error(
       `AI maxMarks (${result.maxMarks}) cannot exceed question maximum (${input.maximumMarks})`
     );
   }
 
-  // 5. criteria marks never exceed rubric limits
+  // 4. Confidence bounds [0, 1]
+  if (result.confidence < 0 || result.confidence > 1 || isNaN(result.confidence)) {
+    throw new Error(`AI confidence (${result.confidence}) out of bounds [0, 1]`);
+  }
+
+  // 5. Criteria validation: marks never exceed rubric criterion limits, and awardedMarks >= 0
+  let totalCriteriaAwarded = 0;
   for (const crit of result.criteria) {
+    if (crit.awardedMarks < 0) {
+      throw new Error(`Criterion '${crit.name}' awarded marks cannot be negative`);
+    }
     if (crit.awardedMarks > crit.maxMarks) {
       throw new Error(
         `Criterion '${crit.name}' awarded marks (${crit.awardedMarks}) exceeds criterion maximum (${crit.maxMarks})`
       );
     }
+    if (crit.maxMarks > input.maximumMarks) {
+      throw new Error(
+        `Criterion '${crit.name}' maxMarks (${crit.maxMarks}) exceeds question maximum (${input.maximumMarks})`
+      );
+    }
+    totalCriteriaAwarded += crit.awardedMarks;
   }
 
-  // 6. confidence is between 0 and 1 (guaranteed by zod schema)
+  // 6. Criteria sum safety gate: awarded criteria cannot exceed question maximum
+  if (totalCriteriaAwarded > input.maximumMarks + 0.01) {
+    throw new Error(
+      `Total criteria awarded marks (${totalCriteriaAwarded}) exceeds question maximum (${input.maximumMarks})`
+    );
+  }
 
-  return result;
+  // 7. Human review safety: AI is advisory; flag human review on low confidence, missing concepts, or edge cases
+  const needsHumanReview =
+    result.needsHumanReview ||
+    result.confidence < 0.85 ||
+    (result.missingConcepts && result.missingConcepts.length > 0) ||
+    result.suggestedMarks === 0;
+
+  return {
+    ...result,
+    needsHumanReview,
+  };
 }
 
 // =============================================================================
@@ -334,6 +364,18 @@ function createFallbackResult(
 
 export class EvaluationAssistantService {
   /**
+   * Diagnostic method to inspect configuration state without exposing secrets.
+   */
+  public static getConfigurationStatus(): {
+    isConfigured: boolean;
+    hasApiKey: boolean;
+    configuredModel: string;
+    resolvedModel: string;
+  } {
+    return geminiManager.getConfigStatus();
+  }
+
+  /**
    * Evaluates a student's answer using Gemini Multimodal Model.
    * Never blocks manual examiner marking.
    */
@@ -353,7 +395,10 @@ export class EvaluationAssistantService {
     }
 
     // 2. Rule 7: If OCR quality is poor and answer image is unavailable, do not invent evaluation
-    const hasImage = Boolean(input.studentAnswerImage);
+    const hasImage = Boolean(
+      input.studentAnswerImage ||
+      (input.studentAnswerImages && input.studentAnswerImages.length > 0)
+    );
     const hasOcr = Boolean(input.ocrText && input.ocrText.trim().length > 0);
 
     if (!hasImage && !hasOcr) {
@@ -383,10 +428,10 @@ export class EvaluationAssistantService {
       );
     }
 
-    // 3. Check GEMINI_API_KEY
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey.trim() === '') {
-      logAssistantEvent('warn', 'GEMINI_API_KEY not configured. Falling back to human review.');
+    // 3. Centralized client check
+    const client = geminiManager.getClient();
+    if (!client) {
+      logAssistantEvent('warn', 'Gemini AI client unconfigured (GEMINI_API_KEY missing). Falling back to human review.');
       return createFallbackResult(
         input,
         'AI evaluation assistant is unconfigured (GEMINI_API_KEY missing). Proceed with manual examiner evaluation.',
@@ -394,27 +439,27 @@ export class EvaluationAssistantService {
       );
     }
 
-    // 4. Execute AI Evaluation
+    // 4. Execute AI Evaluation with @google/genai
     try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
-      const model = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1, // Low temperature for deterministic grading
-        },
-      });
+      const candidateModels = geminiManager.getCandidateModels();
+      const preferredModel = candidateModels[0];
 
       const prompt = buildEvaluationPrompt(input);
-      const contents: Array<string | { inlineData: { data: string; mimeType: string } }> = [
+      const contents: Array<any> = [
         prompt,
       ];
 
-      // Attach image if available
-      if (input.studentAnswerImage) {
+      // Attach images (supporting multiple mapped pages)
+      const imagesToAttach: Array<string | Buffer> = [];
+      if (input.studentAnswerImages && input.studentAnswerImages.length > 0) {
+        imagesToAttach.push(...input.studentAnswerImages);
+      } else if (input.studentAnswerImage) {
+        imagesToAttach.push(input.studentAnswerImage);
+      }
+
+      for (const img of imagesToAttach) {
         const imagePart = await resolveImagePart(
-          input.studentAnswerImage,
+          img,
           input.studentAnswerImageMimeType
         );
         if (imagePart) {
@@ -422,8 +467,33 @@ export class EvaluationAssistantService {
         }
       }
 
-      const response = await model.generateContent(contents);
-      const responseText = response.response.text();
+      let responseText = '';
+      let usedModel = preferredModel;
+      let lastError: Error | null = null;
+
+      for (const m of candidateModels) {
+        try {
+          const response = await client.models.generateContent({
+            model: m,
+            contents,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.1, // Low temperature for deterministic evaluation
+            },
+          });
+          responseText = response.text || '';
+          usedModel = m;
+          lastError = null;
+          break;
+        } catch (err: any) {
+          lastError = err;
+          // Try next candidate model
+        }
+      }
+
+      if (lastError && !responseText) {
+        throw lastError;
+      }
 
       // Parse JSON response
       let parsedRaw: unknown;
@@ -449,13 +519,23 @@ export class EvaluationAssistantService {
         confidence: validatedResult.confidence,
         needsHumanReview: validatedResult.needsHumanReview,
         criteriaEvaluated: validatedResult.criteria.length,
+        model: usedModel,
       });
 
-      return validatedResult;
+      return {
+        ...validatedResult,
+        model: usedModel,
+      };
     } catch (error: any) {
       const durationMs = Date.now() - startTime;
+      const sanitizedError = (error?.message || '')
+        .replace(/key=[^&\s]+/gi, 'key=REDACTED')
+        .replace(/bearer\s+[^\s]+/gi, 'Bearer REDACTED')
+        .replace(/AIza[a-zA-Z0-9_\-]+/gi, 'REDACTED')
+        .replace(/AQ\.[a-zA-Z0-9_\-]+/gi, 'REDACTED') || 'AI model invocation error';
+
       logAssistantEvent('error', 'AI Evaluation Assistant execution failed', {
-        error: error.message,
+        error: sanitizedError,
         durationMs,
         maximumMarks: input.maximumMarks,
         hasImage,
@@ -465,7 +545,7 @@ export class EvaluationAssistantService {
       // Rule 8: AI failures must NOT block manual examiner marking
       return createFallbackResult(
         input,
-        `AI copilot suggestion could not be completed (${error.message}). Examiner manual marking is required.`,
+        `AI copilot suggestion could not be completed (${sanitizedError}). Examiner manual marking is required.`,
         'Automated analysis encountered an error.'
       );
     }

@@ -55,6 +55,12 @@ export function validateProcessingStateTransition(
   }
 }
 
+export interface IQuestionPageMapping {
+  questionNumber: number;
+  pages: number[];
+  verified?: boolean;
+}
+
 export interface IAnswerBook extends Document {
   _id: mongoose.Types.ObjectId;
   examId: mongoose.Types.ObjectId;
@@ -75,6 +81,7 @@ export interface IAnswerBook extends Document {
     secureUrl?: string;
   };
   assignedExaminerId?: mongoose.Types.ObjectId;
+  questionPageMapping?: IQuestionPageMapping[];
   createdAt: Date;
   updatedAt: Date;
   transitionProcessingStatus(newStatus: ProcessingStatus): void;
@@ -155,6 +162,13 @@ const AnswerBookSchema = new Schema<IAnswerBook>(
       default: null,
       index: true,
     },
+    questionPageMapping: [
+      {
+        questionNumber: { type: Number, required: true },
+        pages: [{ type: Number, required: true }],
+        verified: { type: Boolean, default: false },
+      },
+    ],
   },
   { timestamps: true }
 );
