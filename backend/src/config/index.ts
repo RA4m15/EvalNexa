@@ -41,9 +41,9 @@ export const config = {
     'http://127.0.0.1:5178',
   ],
   cloudinary: {
-    cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
-    apiKey: process.env.CLOUDINARY_API_KEY || '',
-    apiSecret: process.env.CLOUDINARY_API_SECRET || '',
+    cloudName: (process.env.CLOUDINARY_CLOUD_NAME || '').trim().replace(/^["']|["']$/g, ''),
+    apiKey: (process.env.CLOUDINARY_API_KEY || '').trim().replace(/^["']|["']$/g, ''),
+    apiSecret: (process.env.CLOUDINARY_API_SECRET || '').trim().replace(/^["']|["']$/g, ''),
   },
   ingestionApiKey: process.env.INGESTION_API_KEY || '',
   gemini: {
