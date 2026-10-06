@@ -5,6 +5,7 @@ import { AnswerBook } from '../models/AnswerBook';
 import { AnswerPage } from '../models/AnswerPage';
 import { Question } from '../models/Question';
 import { Exam } from '../models/Exam';
+import { MultiModelOrchestrator } from './ai/MultiModelOrchestrator';
 
 // =============================================================================
 // TYPES & SCHEMAS
@@ -27,6 +28,18 @@ export interface EvaluationAssistantResult {
   missingConcepts: string[];
   reasoningSummary: string;
   model?: string;
+  ensembleMetadata?: {
+    modelsEvaluated: string[];
+    modelsRespondedCount: number;
+    agreementRatio: number;
+    scoreVariance: number;
+    individualScores: Array<{
+      model: string;
+      score: number;
+      latencyMs: number;
+    }>;
+    consensusStrategy: 'UNANIMOUS' | 'MAJORITY_QUORUM' | 'WEIGHTED_MEDIAN' | 'SINGLE_FALLBACK';
+  };
 }
 
 export interface EvaluationAssistantInput {
@@ -172,7 +185,7 @@ async function resolveImagePart(
 // PROMPT BUILDER
 // =============================================================================
 
-function buildEvaluationPrompt(input: EvaluationAssistantInput): string {
+export function buildEvaluationPrompt(input: EvaluationAssistantInput): string {
   const rubricText =
     input.rubric.length > 0
       ? input.rubric
@@ -428,103 +441,42 @@ export class EvaluationAssistantService {
       );
     }
 
-    // 3. Centralized client check
-    const client = geminiManager.getClient();
-    if (!client) {
-      logAssistantEvent('warn', 'Gemini AI client unconfigured (GEMINI_API_KEY missing). Falling back to human review.');
+    // 3. Centralized client & provider availability check
+    const activeEvaluators = MultiModelOrchestrator.getActiveEvaluators();
+    if (activeEvaluators.length === 0) {
+      logAssistantEvent('warn', 'No AI evaluators configured (GEMINI_API_KEY / OPENAI_API_KEY missing). Falling back to human review.');
       return createFallbackResult(
         input,
-        'AI evaluation assistant is unconfigured (GEMINI_API_KEY missing). Proceed with manual examiner evaluation.',
+        'AI evaluation assistant is unconfigured (API keys missing). Proceed with manual examiner evaluation.',
         'AI copilot service unconfigured.'
       );
     }
 
-    // 4. Execute AI Evaluation with @google/genai
+    // 4. Execute Multi-LLM Parallel Evaluation & Consensus
     try {
-      const candidateModels = geminiManager.getCandidateModels();
-      const preferredModel = candidateModels[0];
+      const ensembleResult = await MultiModelOrchestrator.evaluateParallel(input);
 
-      const prompt = buildEvaluationPrompt(input);
-      const contents: Array<any> = [
-        prompt,
-      ];
-
-      // Attach images (supporting multiple mapped pages)
-      const imagesToAttach: Array<string | Buffer> = [];
-      if (input.studentAnswerImages && input.studentAnswerImages.length > 0) {
-        imagesToAttach.push(...input.studentAnswerImages);
-      } else if (input.studentAnswerImage) {
-        imagesToAttach.push(input.studentAnswerImage);
-      }
-
-      for (const img of imagesToAttach) {
-        const imagePart = await resolveImagePart(
-          img,
-          input.studentAnswerImageMimeType
-        );
-        if (imagePart) {
-          contents.push(imagePart);
-        }
-      }
-
-      let responseText = '';
-      let usedModel = preferredModel;
-      let lastError: Error | null = null;
-
-      for (const m of candidateModels) {
-        try {
-          const response = await client.models.generateContent({
-            model: m,
-            contents,
-            config: {
-              responseMimeType: 'application/json',
-              temperature: 0.1, // Low temperature for deterministic evaluation
-            },
-          });
-          responseText = response.text || '';
-          usedModel = m;
-          lastError = null;
-          break;
-        } catch (err: any) {
-          lastError = err;
-          // Try next candidate model
-        }
-      }
-
-      if (lastError && !responseText) {
-        throw lastError;
-      }
-
-      // Parse JSON response
-      let parsedRaw: unknown;
-      try {
-        parsedRaw = JSON.parse(responseText);
-      } catch (jsonErr: any) {
-        // Strip code fences if present
-        const cleaned = responseText
-          .replace(/```(?:json)?/gi, '')
-          .replace(/```/g, '')
-          .trim();
-        parsedRaw = JSON.parse(cleaned);
-      }
-
-      // Validate schema and constraints
-      const validatedResult = validateAndEnforceAssistantConstraints(parsedRaw, input);
+      // Validate schema and safety constraints
+      const validatedResult = validateAndEnforceAssistantConstraints(ensembleResult, input);
 
       const durationMs = Date.now() - startTime;
-      logAssistantEvent('info', 'AI evaluation suggestion generated successfully', {
+      logAssistantEvent('info', 'Multi-LLM evaluation consensus generated successfully', {
         durationMs,
         suggestedMarks: validatedResult.suggestedMarks,
         maximumMarks: input.maximumMarks,
         confidence: validatedResult.confidence,
         needsHumanReview: validatedResult.needsHumanReview,
         criteriaEvaluated: validatedResult.criteria.length,
-        model: usedModel,
+        model: ensembleResult.model,
+        modelsRespondedCount: ensembleResult.ensembleMetadata.modelsRespondedCount,
+        agreementRatio: ensembleResult.ensembleMetadata.agreementRatio,
+        consensusStrategy: ensembleResult.ensembleMetadata.consensusStrategy,
       });
 
       return {
         ...validatedResult,
-        model: usedModel,
+        model: ensembleResult.model,
+        ensembleMetadata: ensembleResult.ensembleMetadata,
       };
     } catch (error: any) {
       const durationMs = Date.now() - startTime;
