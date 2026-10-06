@@ -21,6 +21,7 @@ import path from 'path';
 import fs from 'fs';
 import mongoose from 'mongoose';
 import { config } from '../config';
+import { areEntityIdsEqual } from '../utils/identity';
 
 export async function getAnswerBooks(req: AuthRequest, res: Response): Promise<void> {
   try {
@@ -254,7 +255,7 @@ export async function getAnswerBookPages(req: AuthRequest, res: Response): Promi
 
     // Examiners can only see pages of answer books assigned to them
     if (userRole === 'EXAMINER') {
-      if (!answerBook.assignedExaminerId || answerBook.assignedExaminerId.toString() !== userId) {
+      if (!areEntityIdsEqual(answerBook.assignedExaminerId, userId)) {
         res.status(403).json({
           success: false,
           message: 'Access denied: Answer book is not assigned to you',
@@ -312,7 +313,7 @@ export async function getAnswerBookPage(req: AuthRequest, res: Response): Promis
 
     // Strict access control: examiner cannot view another examiner's answer book
     if (userRole === 'EXAMINER') {
-      if (!answerBook.assignedExaminerId || answerBook.assignedExaminerId.toString() !== userId) {
+      if (!areEntityIdsEqual(answerBook.assignedExaminerId, userId)) {
         res.status(403).json({
           success: false,
           message: 'Access denied: Answer book is not assigned to you',
