@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/control-center" },
+    { "path": "./apps/examiner" },
+    { "path": "./apps/moderation" },
+    { "path": "./backend" },
+    { "path": "./packages/types" },
+    { "path": "./packages/ui" }
+  ]
+}
