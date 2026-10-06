@@ -162,6 +162,7 @@ export type EvaluationStatus =
 export type QuestionMarkStatus = 'NOT_STARTED' | 'MARKED' | 'FLAGGED' | 'NOT_ATTEMPTED';
 
 export interface QuestionMarkAiAnalysis {
+  questionPaperId?: string;
   suggestedMarks: number;
   minMarks: number;
   maxMarks: number;

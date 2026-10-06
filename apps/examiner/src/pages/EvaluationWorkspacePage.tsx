@@ -164,11 +164,10 @@ export function EvaluationWorkspacePage() {
       }));
     }
 
-    // 2. Extracted (unverified) QuestionPaper questions if present and no exam questions
+    // 2. Extracted (unverified) QuestionPaper questions if present
     if (
       questionPaper?.extractedQuestions &&
-      questionPaper.extractedQuestions.length > 0 &&
-      questions.length === 0
+      questionPaper.extractedQuestions.length > 0
     ) {
       return questionPaper.extractedQuestions.map((eq) => ({
         _id: `qp-ext-${eq.questionNumber}`,
@@ -344,7 +343,15 @@ export function EvaluationWorkspacePage() {
     if (evaluation) {
       if (evaluation.remarks) setEvaluationRemarks(evaluation.remarks);
       if (evaluation.questionMarks && evaluation.questionMarks.length > 0) {
-        setMarksState(evaluation.questionMarks);
+        // Strip out any stale AI analysis that belongs to a different question paper
+        const sanitizedMarks = evaluation.questionMarks.map((m) => {
+          if (questionPaper?._id && m.aiAnalysis && m.aiAnalysis.questionPaperId !== questionPaper._id) {
+            const { aiAnalysis, ...rest } = m;
+            return rest as QuestionMarkItem;
+          }
+          return m;
+        });
+        setMarksState(sanitizedMarks);
       } else {
         const init = activeQuestions.map((q) => ({
           questionNumber: q.questionNumber,
@@ -363,7 +370,28 @@ export function EvaluationWorkspacePage() {
       }));
       setMarksState(init);
     }
-  }, [evaluation, activeQuestions]);
+  }, [evaluation, activeQuestions, questionPaper?._id]);
+
+  // When questionPaper._id changes, immediately clear any AI analyses in marksState that do not match the new paper
+  useEffect(() => {
+    if (questionPaper?._id) {
+      setMarksState((prev) =>
+        prev.map((m) => {
+          if (m.aiAnalysis && m.aiAnalysis.questionPaperId !== questionPaper._id) {
+            const { aiAnalysis, ...rest } = m;
+            return rest as QuestionMarkItem;
+          }
+          return m;
+        })
+      );
+      setAiError(null);
+    }
+  }, [questionPaper?._id]);
+
+  // When active question changes, clear transient AI error
+  useEffect(() => {
+    setAiError(null);
+  }, [activeQIndex]);
 
   const activeQuestion = activeQuestions[activeQIndex] || activeQuestions[0];
   const activeMarkItem = marksState.find((m) => m.questionNumber === activeQuestion?.questionNumber) || {
@@ -372,6 +400,17 @@ export function EvaluationWorkspacePage() {
     status: 'NOT_STARTED' as QuestionMarkStatus,
     comment: '',
   };
+
+  // Active AI analysis that strictly validates against the current QuestionPaper
+  const activeAiAnalysis = useMemo(() => {
+    if (!activeMarkItem?.aiAnalysis) return null;
+    if (questionPaper?._id) {
+      if (activeMarkItem.aiAnalysis.questionPaperId !== questionPaper._id) {
+        return null;
+      }
+    }
+    return activeMarkItem.aiAnalysis;
+  }, [activeMarkItem?.aiAnalysis, questionPaper?._id]);
 
   // Sync inputs with active question selection
   useEffect(() => {
@@ -541,12 +580,29 @@ export function EvaluationWorkspacePage() {
 
   // Mutation: Request AI assistance suggestion
   const aiSuggestMutation = useMutation({
-    mutationFn: async ({ questionNumber, forceRefresh }: { questionNumber: number; forceRefresh?: boolean }) => {
+    mutationFn: async ({
+      questionNumber,
+      forceRefresh = true,
+      questionPaperId,
+      questionId,
+    }: {
+      questionNumber: number;
+      forceRefresh?: boolean;
+      questionPaperId?: string;
+      questionId?: string;
+    }) => {
       if (!evaluation) throw new Error('No evaluation in progress');
       setAiError(null);
       const refreshQuery = forceRefresh ? '&forceRefresh=true' : '';
       const res = await apiClient.post(
-        `/evaluations/${evaluation._id}/questions/${questionNumber}/ai-suggest?pageNumber=${currentPage}${refreshQuery}`
+        `/evaluations/${evaluation._id}/questions/${questionNumber}/ai-suggest?pageNumber=${currentPage}${refreshQuery}`,
+        {
+          answerBookId: id,
+          questionPaperId: questionPaperId || questionPaper?._id,
+          questionNumber,
+          questionId,
+          forceRefresh: true,
+        }
       );
       return { questionNumber, aiData: res.data.data as QuestionMarkAiAnalysis };
     },
@@ -590,10 +646,15 @@ export function EvaluationWorkspacePage() {
     setIgnoredQuestions((prev) => ({ ...prev, [questionNumber]: true }));
   };
 
-  const handleRequestAi = (forceRefresh = false) => {
+  const handleRequestAi = (forceRefresh = true) => {
     if (!evaluation || !activeQuestion) return;
     setAiError(null);
-    aiSuggestMutation.mutate({ questionNumber: activeQuestion.questionNumber, forceRefresh });
+    aiSuggestMutation.mutate({
+      questionNumber: activeQuestion.questionNumber,
+      forceRefresh,
+      questionPaperId: questionPaper?._id,
+      questionId: (activeQuestion as any)._id,
+    });
   };
 
   const handleNextQuestion = () => {
@@ -1784,16 +1845,16 @@ export function EvaluationWorkspacePage() {
             {aiSuggestMutation.isPending && (
               <div style={{ padding: '12px 0', textAlign: 'center', color: 'var(--navy)' }}>
                 <div style={{ fontSize: 14, fontStyle: 'italic', marginBottom: 4 }}>
-                  Evaluating Question {activeQuestion?.questionNumber} with EvalNexa AI…
+                  Analyzing Question {activeQuestion?.questionNumber} using the active Question Paper…
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--charcoal)' }}>
-                  Analyzing answer script scan against grading rubric
+                  Evaluating student answer against active question rubric
                 </div>
               </div>
             )}
 
             {/* Error / AI Unavailable State */}
-            {!aiSuggestMutation.isPending && (aiError || (activeMarkItem.aiAnalysis && activeMarkItem.aiAnalysis.confidence === 0)) && (
+            {!aiSuggestMutation.isPending && (aiError || (activeAiAnalysis && activeAiAnalysis.confidence === 0)) && (
               <div
                 style={{
                   padding: '10px 12px',
@@ -1806,7 +1867,7 @@ export function EvaluationWorkspacePage() {
                   AI assistance unavailable. Continue manual evaluation.
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--charcoal)', lineHeight: 1.4 }}>
-                  {aiError || activeMarkItem.aiAnalysis?.reasoningSummary || 'The AI service could not evaluate this response.'}
+                  {aiError || activeAiAnalysis?.reasoningSummary || 'The AI service could not evaluate this response.'}
                 </div>
                 {isInProgress && (
                   <button
@@ -1822,7 +1883,7 @@ export function EvaluationWorkspacePage() {
             )}
 
             {/* Ignored State */}
-            {!aiSuggestMutation.isPending && !aiError && activeMarkItem.aiAnalysis && activeMarkItem.aiAnalysis.confidence > 0 && ignoredQuestions[activeQuestion?.questionNumber] && (
+            {!aiSuggestMutation.isPending && !aiError && activeAiAnalysis && activeAiAnalysis.confidence > 0 && ignoredQuestions[activeQuestion?.questionNumber] && (
               <div style={{ fontSize: 13, color: 'var(--charcoal)', padding: '4px 0' }}>
                 <div style={{ marginBottom: 8 }}>
                   Suggestion dismissed for Question {activeQuestion?.questionNumber}.
@@ -1839,7 +1900,7 @@ export function EvaluationWorkspacePage() {
             )}
 
             {/* Valid AI Suggestion Display */}
-            {!aiSuggestMutation.isPending && !aiError && activeMarkItem.aiAnalysis && activeMarkItem.aiAnalysis.confidence > 0 && !ignoredQuestions[activeQuestion?.questionNumber] && (
+            {!aiSuggestMutation.isPending && !aiError && activeAiAnalysis && activeAiAnalysis.confidence > 0 && !ignoredQuestions[activeQuestion?.questionNumber] && (
               <div>
                 {/* Score & Confidence */}
                 <div
@@ -1857,7 +1918,7 @@ export function EvaluationWorkspacePage() {
                       Suggested:
                     </span>{' '}
                     <strong style={{ fontSize: 20, color: 'var(--navy)' }}>
-                      {activeMarkItem.aiAnalysis.suggestedMarks}
+                      {activeAiAnalysis.suggestedMarks}
                     </strong>
                     <span style={{ fontSize: 14, color: 'var(--charcoal)' }}>
                       {' '}/ {activeQuestion?.maximumMarks}
@@ -1868,13 +1929,13 @@ export function EvaluationWorkspacePage() {
                       Confidence:
                     </span>{' '}
                     <strong style={{ fontSize: 15, color: 'var(--navy)' }}>
-                      {Math.round(activeMarkItem.aiAnalysis.confidence * 100)}%
+                      {Math.round(activeAiAnalysis.confidence * 100)}%
                     </strong>
                   </div>
                 </div>
 
                 {/* Low confidence warning */}
-                {(activeMarkItem.aiAnalysis.confidence < 0.75 || activeMarkItem.aiAnalysis.needsHumanReview) && (
+                {(activeAiAnalysis.confidence < 0.75 || activeAiAnalysis.needsHumanReview) && (
                   <div
                     style={{
                       fontSize: 12,
@@ -1892,7 +1953,7 @@ export function EvaluationWorkspacePage() {
                 )}
 
                 {/* Criterion breakdown */}
-                {activeMarkItem.aiAnalysis.criteria && activeMarkItem.aiAnalysis.criteria.length > 0 && (
+                {activeAiAnalysis.criteria && activeAiAnalysis.criteria.length > 0 && (
                   <div style={{ marginBottom: 10 }}>
                     <div
                       style={{
@@ -1907,7 +1968,7 @@ export function EvaluationWorkspacePage() {
                       Criterion breakdown:
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      {activeMarkItem.aiAnalysis.criteria.map((crit, cIdx) => (
+                      {activeAiAnalysis.criteria.map((crit, cIdx) => (
                         <div
                           key={cIdx}
                           style={{
@@ -1929,7 +1990,7 @@ export function EvaluationWorkspacePage() {
                 )}
 
                 {/* Missing concepts */}
-                {activeMarkItem.aiAnalysis.missingConcepts && activeMarkItem.aiAnalysis.missingConcepts.length > 0 && (
+                {activeAiAnalysis.missingConcepts && activeAiAnalysis.missingConcepts.length > 0 && (
                   <div style={{ marginBottom: 10 }}>
                     <div
                       style={{
@@ -1944,7 +2005,7 @@ export function EvaluationWorkspacePage() {
                       Missing concepts:
                     </div>
                     <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: 'var(--charcoal)', lineHeight: 1.4 }}>
-                      {activeMarkItem.aiAnalysis.missingConcepts.map((concept, cIdx) => (
+                      {activeAiAnalysis.missingConcepts.map((concept, cIdx) => (
                         <li key={cIdx}>- {concept}</li>
                       ))}
                     </ul>
@@ -1966,7 +2027,7 @@ export function EvaluationWorkspacePage() {
                         color: '#15803d',
                         fontWeight: 700,
                       }}
-                      onClick={() => handleUseSuggestion(activeMarkItem.aiAnalysis!.suggestedMarks)}
+                      onClick={() => handleUseSuggestion(activeAiAnalysis.suggestedMarks)}
                     >
                       Use Suggestion
                     </button>
@@ -1984,17 +2045,20 @@ export function EvaluationWorkspacePage() {
             )}
 
             {/* Un-evaluated State */}
-            {!aiSuggestMutation.isPending && !aiError && !activeMarkItem.aiAnalysis && (
+            {!aiSuggestMutation.isPending && !aiError && !activeAiAnalysis && (
               <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--navy)', marginBottom: 4 }}>
+                  AI suggestion not generated for this question yet.
+                </div>
                 <p style={{ fontSize: 13, color: 'var(--charcoal)', margin: '0 0 10px 0', lineHeight: 1.4 }}>
-                  Request AI assistance to evaluate this answer script page against the marking rubric.
+                  Request AI assistance to evaluate Question {activeQuestion?.questionNumber} against the active Question Paper rubric.
                 </p>
                 {isInProgress ? (
                   <button
                     type="button"
                     className="btn btn-secondary"
                     style={{ width: '100%', fontSize: 13, padding: '8px 12px', justifyContent: 'center' }}
-                    onClick={() => handleRequestAi(false)}
+                    onClick={() => handleRequestAi(true)}
                   >
                     ✦ Request AI Assistance
                   </button>

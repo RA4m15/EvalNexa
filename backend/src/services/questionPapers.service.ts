@@ -3,6 +3,7 @@ import { QuestionPaper, IQuestionPaper } from '../models/QuestionPaper';
 import { AnswerBook } from '../models/AnswerBook';
 import { Exam } from '../models/Exam';
 import { Question } from '../models/Question';
+import { Evaluation } from '../models/Evaluation';
 import {
   uploadMediaBuffer,
   buildQuestionPaperPublicId,
@@ -113,6 +114,25 @@ export async function uploadAndProcessQuestionPaper(
     targetAnswerBook.questionPaperId = questionPaper._id;
     targetAnswerBook.paperSet = cleanSet;
     await targetAnswerBook.save();
+
+    // Clear previous stale AI suggestions on this AnswerBook's evaluation
+    try {
+      const evaluation = await Evaluation.findOne({ answerBookId: targetAnswerBook._id });
+      if (evaluation && evaluation.questionMarks && evaluation.questionMarks.length > 0) {
+        let changed = false;
+        for (const qm of evaluation.questionMarks) {
+          if (qm.aiAnalysis) {
+            qm.aiAnalysis = undefined as any;
+            changed = true;
+          }
+        }
+        if (changed) {
+          await evaluation.save();
+        }
+      }
+    } catch (clearErr) {
+      console.warn('[QuestionPapersService] Non-fatal evaluation AI cache clear warning:', clearErr);
+    }
   }
 
   // 7. Extract Questions using Gemini Multimodal Model
@@ -347,6 +367,25 @@ export async function verifyQuestionPaperQuestions(
       answerBook.questionPaperId = questionPaper._id;
       answerBook.paperSet = questionPaper.paperSet;
       await answerBook.save();
+
+      // Clear previous stale AI suggestions on this AnswerBook's evaluation
+      try {
+        const evaluation = await Evaluation.findOne({ answerBookId: answerBook._id });
+        if (evaluation && evaluation.questionMarks && evaluation.questionMarks.length > 0) {
+          let changed = false;
+          for (const qm of evaluation.questionMarks) {
+            if (qm.aiAnalysis) {
+              qm.aiAnalysis = undefined as any;
+              changed = true;
+            }
+          }
+          if (changed) {
+            await evaluation.save();
+          }
+        }
+      } catch (clearErr) {
+        console.warn('[QuestionPapersService] Non-fatal evaluation AI cache clear warning:', clearErr);
+      }
     }
   }
 

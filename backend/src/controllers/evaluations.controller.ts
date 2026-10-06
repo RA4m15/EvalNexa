@@ -96,17 +96,26 @@ export async function getAIEvaluationSuggestion(req: AuthRequest, res: Response)
     const { id, evaluationId, questionNumber } = req.params;
     const targetEvaluationId = evaluationId || id;
     const { pageNumber, force, forceRefresh } = req.query;
-    const isForce = force === 'true' || forceRefresh === 'true' || req.body?.force === true;
+    const isForce =
+      force === 'true' ||
+      forceRefresh === 'true' ||
+      req.body?.force === true ||
+      req.body?.forceRefresh === true;
+
+    const qNum = parseInt((questionNumber || req.body?.questionNumber) as string, 10);
 
     const result = await evaluationsService.requestAISuggestionForQuestion(
       targetEvaluationId,
-      parseInt(questionNumber, 10),
+      qNum,
       {
         pageNumber: pageNumber ? parseInt(pageNumber as string, 10) : undefined,
         forceRefresh: isForce,
         userRole: req.user!.role,
         userId: req.user!._id.toString(),
         userName: req.user!.name,
+        answerBookId: req.body?.answerBookId,
+        questionPaperId: req.body?.questionPaperId,
+        questionId: req.body?.questionId,
       }
     );
 

@@ -2,6 +2,7 @@ import mongoose, { Document, Schema } from 'mongoose';
 import { EvaluationStatus } from '@evalnexa/types';
 
 export interface IEvaluationQuestionAiAnalysis {
+  questionPaperId?: mongoose.Types.ObjectId;
   suggestedMarks: number;
   minMarks: number;
   maxMarks: number;
@@ -80,6 +81,7 @@ const EvaluationSchema = new Schema<IEvaluation>(
         aiAnalysis: {
           type: new Schema(
             {
+              questionPaperId: { type: Schema.Types.ObjectId, ref: 'QuestionPaper' },
               suggestedMarks: { type: Number },
               minMarks: { type: Number },
               maxMarks: { type: Number },

@@ -648,10 +648,16 @@ export async function requestAISuggestionForQuestion(
     userRole: string;
     userId: string;
     userName?: string;
+    answerBookId?: string;
+    questionPaperId?: string;
+    questionId?: string;
   }
 ) {
   // 1. Authenticate user & RBAC
-  const evaluation = await Evaluation.findById(evaluationId);
+  let evaluation = await Evaluation.findById(evaluationId);
+  if (!evaluation) {
+    evaluation = await Evaluation.findOne({ answerBookId: evaluationId });
+  }
   if (!evaluation) {
     const error: any = new Error('Evaluation not found');
     error.status = 404;
@@ -686,28 +692,69 @@ export async function requestAISuggestionForQuestion(
     }
   }
 
-  // 3. Check for existing cached analysis to avoid redundant duplicate AI generation
+  // 3. Fetch authoritative AnswerBook
+  let answerBook = null;
+  if (options.answerBookId) {
+    answerBook = await AnswerBook.findById(options.answerBookId);
+  }
+  if (!answerBook && evaluation.answerBookId) {
+    answerBook = await AnswerBook.findById(evaluation.answerBookId);
+  }
+  if (!answerBook) {
+    const error: any = new Error('Associated answer book not found');
+    error.status = 404;
+    error.code = 'ANSWER_BOOK_NOT_FOUND';
+    throw error;
+  }
+
+  // 4. Resolve Authoritative QuestionPaper
+  let activeQuestionPaper = null;
+  const targetQpId = options.questionPaperId || answerBook.questionPaperId;
+  if (targetQpId) {
+    activeQuestionPaper = await QuestionPaper.findById(targetQpId);
+  }
+
+  // Ensure answerBook links to activeQuestionPaper if found
+  if (
+    activeQuestionPaper &&
+    (!answerBook.questionPaperId ||
+      answerBook.questionPaperId.toString() !== activeQuestionPaper._id.toString())
+  ) {
+    answerBook.questionPaperId = activeQuestionPaper._id;
+    await answerBook.save();
+  }
+
+  // 5. Check for existing cached analysis to avoid redundant duplicate AI generation
   const existingIndex = evaluation.questionMarks.findIndex(
     (q) => q.questionNumber === questionNumber
   );
   const existingQm = existingIndex >= 0 ? evaluation.questionMarks[existingIndex] : null;
 
+  // Stale cache gate:
+  // If we have an active QuestionPaper, cached analysis is ONLY valid if it was generated
+  // for THIS exact questionPaperId. If questionPaperId changed or is missing, ignore cache.
+  let isCacheValid = false;
   if (existingQm?.aiAnalysis?.generatedAt && !options.forceRefresh) {
+    if (activeQuestionPaper) {
+      const cachedQpId = existingQm.aiAnalysis.questionPaperId?.toString();
+      if (cachedQpId && cachedQpId === activeQuestionPaper._id.toString()) {
+        isCacheValid = true;
+      }
+    } else {
+      // Fallback mode without question paper:
+      if (!existingQm.aiAnalysis.questionPaperId) {
+        isCacheValid = true;
+      }
+    }
+  }
+
+  if (isCacheValid && existingQm?.aiAnalysis) {
     return {
       cached: true,
       aiAnalysis: existingQm.aiAnalysis,
       evaluationId: evaluation._id.toString(),
       questionNumber,
     };
-  }
-
-  // 4. Fetch authoritative AnswerBook, Exam, Question, Rubric, Reference Answer
-  const answerBook = await AnswerBook.findById(evaluation.answerBookId);
-  if (!answerBook) {
-    const error: any = new Error('Associated answer book not found');
-    error.status = 404;
-    error.code = 'ANSWER_BOOK_NOT_FOUND';
-    throw error;
   }
 
   const examId =
@@ -732,26 +779,53 @@ export async function requestAISuggestionForQuestion(
   let targetKeyConcepts: string[] | undefined = undefined;
   let targetGradingNotes: string | undefined = undefined;
   let targetLanguage: string | undefined = undefined;
+  let questionSource = 'EXAM_QUESTIONS_FALLBACK';
 
-  // 4a. Check QuestionPaper if associated with AnswerBook
-  if (answerBook.questionPaperId) {
-    const qp = await QuestionPaper.findById(answerBook.questionPaperId);
-    if (qp) {
-      const qList = qp.verifiedQuestions && qp.verifiedQuestions.length > 0
-        ? qp.verifiedQuestions
-        : qp.extractedQuestions;
-      const qMatch = qList?.find((q) => q.questionNumber === questionNumber);
-      if (qMatch) {
-        targetQuestionText = qMatch.text;
-        targetMaximumMarks = qMatch.maximumMarks;
-        targetRubric = qMatch.rubric || [];
-        targetReferenceAnswer = qMatch.referenceAnswer;
-      }
+  // 6. QUESTION PAPER MUST TAKE ABSOLUTE PRIORITY
+  if (activeQuestionPaper) {
+    const isVerified = Boolean(
+      activeQuestionPaper.verifiedQuestions && activeQuestionPaper.verifiedQuestions.length > 0
+    );
+    const qList = isVerified
+      ? activeQuestionPaper.verifiedQuestions
+      : (activeQuestionPaper.extractedQuestions || []);
+
+    // Resolve question by stable questionId or normalized questionNumber
+    let qMatch = null;
+    if (options.questionId) {
+      qMatch = qList.find(
+        (q: any) =>
+          q._id?.toString() === options.questionId ||
+          (q as any).id === options.questionId
+      );
     }
-  }
+    if (!qMatch) {
+      qMatch = qList.find((q) => Number(q.questionNumber) === Number(questionNumber));
+    }
 
-  // 4b. Fallback to Question collection
-  if (!targetQuestionText) {
+    if (qMatch) {
+      targetQuestionText = qMatch.text;
+      targetMaximumMarks = qMatch.maximumMarks;
+      targetRubric =
+        qMatch.rubric && qMatch.rubric.length > 0
+          ? qMatch.rubric.map((r) => ({ criterion: r.criterion, marks: r.marks }))
+          : [
+              { criterion: 'Core answer & understanding', marks: Math.round(qMatch.maximumMarks * 0.6) },
+              { criterion: 'Accuracy & methodology', marks: Math.round(qMatch.maximumMarks * 0.4) },
+            ];
+      targetReferenceAnswer = qMatch.referenceAnswer;
+      questionSource = isVerified ? 'VERIFIED_QUESTION_PAPER' : 'EXTRACTED_QUESTION_PAPER';
+    } else {
+      // Do NOT fall back to Exam.questions if a QuestionPaper is attached!
+      const error: any = new Error(
+        `Question Q${questionNumber} not found in the active Question Paper (${activeQuestionPaper.paperSet || 'Active Set'}).`
+      );
+      error.status = 404;
+      error.code = 'QUESTION_NOT_FOUND_IN_PAPER';
+      throw error;
+    }
+  } else {
+    // 7. Fallback to Question collection ONLY when NO QuestionPaper is attached at all
     const question = await Question.findOne({ examId, questionNumber });
     if (question) {
       targetQuestionText = question.text;
@@ -761,15 +835,27 @@ export async function requestAISuggestionForQuestion(
       targetKeyConcepts = question.keyConcepts;
       targetGradingNotes = question.gradingNotes;
       targetLanguage = question.evaluationLanguage;
+      questionSource = 'EXAM_QUESTIONS_FALLBACK';
     }
   }
 
   if (!targetQuestionText) {
-    const error: any = new Error(`Question Q${questionNumber} not found for this examination or question paper`);
+    const error: any = new Error(
+      `Question Q${questionNumber} not found for this examination or question paper`
+    );
     error.status = 404;
     error.code = 'QUESTION_NOT_FOUND';
     throw error;
   }
+
+  // Safe debug logging (no secrets or sensitive tokens)
+  console.log(`\n[AI CONTEXT]
+AnswerBook ID   : ${answerBook._id}
+QuestionPaper ID: ${activeQuestionPaper?._id || 'None'}
+Question Number : ${questionNumber}
+Question Text   : ${targetQuestionText}
+Maximum Marks   : ${targetMaximumMarks}
+Question Source : ${questionSource}\n`);
 
   // 5. Determine mapped pages for this question from AnswerBook questionPageMapping or options
   let targetPageNumbers: number[] = [];
@@ -905,6 +991,7 @@ export async function requestAISuggestionForQuestion(
   // 7. Store AI analysis in evaluation question data model (NEVER touching final examiner marks)
   const actualModelName = assistantResult.model || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   const aiAnalysisData = {
+    questionPaperId: activeQuestionPaper ? activeQuestionPaper._id : undefined,
     suggestedMarks: assistantResult.suggestedMarks,
     minMarks: assistantResult.minMarks,
     maxMarks: assistantResult.maxMarks,
