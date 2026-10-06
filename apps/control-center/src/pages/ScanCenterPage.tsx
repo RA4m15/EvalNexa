@@ -10,6 +10,9 @@ import {
   processPageWithOpenCVService,
   analyzePageWithCanvas,
   PageQualityDiagnostics,
+  detectDocumentPreview,
+  LiveDocumentDetection,
+  dataUriToBlob,
 } from '../lib/scanningIntegration';
 
 interface CapturedPageItem {
@@ -44,6 +47,21 @@ export function ScanCenterPage() {
   const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isProcessingFrame, setIsProcessingFrame] = useState<boolean>(false);
+
+  // Live Camera Document Detection & Stability State
+  const [liveDetection, setLiveDetection] = useState<LiveDocumentDetection>({
+    detected: false,
+    corners: null,
+    documentScore: 0,
+  });
+  const [stableCount, setStableCount] = useState<number>(0);
+  const [documentReadyToCapture, setDocumentReadyToCapture] = useState<boolean>(false);
+  const [liveStatusText, setLiveStatusText] = useState<string>('ALIGN DOCUMENT');
+  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  const lastCornersRef = useRef<[number, number][] | null>(null);
+  const isDetectingRef = useRef<boolean>(false);
+  const previewAbortRef = useRef<AbortController | null>(null);
 
   // Current page being examined (Step 2 & 3)
   const [currentPendingPage, setCurrentPendingPage] = useState<{
@@ -237,7 +255,191 @@ export function ScanCenterPage() {
       videoRef.current.srcObject = null;
     }
     setIsCameraActive(false);
+    setLiveDetection({ detected: false, corners: null, documentScore: 0 });
+    setStableCount(0);
+    setDocumentReadyToCapture(false);
+    setLiveStatusText('ALIGN DOCUMENT');
+    lastCornersRef.current = null;
+    if (previewAbortRef.current) {
+      previewAbortRef.current.abort();
+      previewAbortRef.current = null;
+    }
   };
+
+  // ---------------------------------------------------------------------------
+  // Live Preview Document Detection Loop (5-7 FPS)
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!isCameraActive || step !== 2) {
+      setLiveDetection({ detected: false, corners: null, documentScore: 0 });
+      setStableCount(0);
+      setDocumentReadyToCapture(false);
+      setLiveStatusText('ALIGN DOCUMENT');
+      lastCornersRef.current = null;
+      if (previewAbortRef.current) {
+        previewAbortRef.current.abort();
+        previewAbortRef.current = null;
+      }
+      return;
+    }
+
+    let isMounted = true;
+    const offscreenCanvas = document.createElement('canvas');
+    const offscreenCtx = offscreenCanvas.getContext('2d');
+
+    const intervalId = window.setInterval(async () => {
+      if (!isMounted || !videoRef.current || isDetectingRef.current || isProcessingFrame) {
+        return;
+      }
+
+      const video = videoRef.current;
+      if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+        return;
+      }
+
+      // Track display dimensions of video element for coordinate mapping
+      if (videoDimensions.width !== video.clientWidth || videoDimensions.height !== video.clientHeight) {
+        setVideoDimensions({ width: video.clientWidth, height: video.clientHeight });
+      }
+
+      isDetectingRef.current = true;
+
+      try {
+        // Downsample frame to 480px width for fast 15ms OpenCV quad detection
+        const sampleW = 480;
+        const sampleH = Math.max(120, Math.round((sampleW / video.videoWidth) * video.videoHeight));
+        offscreenCanvas.width = sampleW;
+        offscreenCanvas.height = sampleH;
+
+        if (offscreenCtx) {
+          offscreenCtx.drawImage(video, 0, 0, sampleW, sampleH);
+        }
+
+        const blob = await new Promise<Blob | null>((resolve) => {
+          offscreenCanvas.toBlob((b) => resolve(b), 'image/jpeg', 0.65);
+        });
+
+        if (!blob || !isMounted) {
+          isDetectingRef.current = false;
+          return;
+        }
+
+        const controller = new AbortController();
+        previewAbortRef.current = controller;
+        const timeoutId = window.setTimeout(() => controller.abort(), 1200);
+
+        const result = await detectDocumentPreview(blob, controller.signal);
+        window.clearTimeout(timeoutId);
+
+        if (!isMounted) return;
+
+        setLiveDetection(result);
+
+        if (result.detected && result.corners && result.corners.length === 4) {
+          const currentCorners = result.corners;
+          const imgW = result.imageWidth || sampleW;
+          const imgH = result.imageHeight || sampleH;
+
+          let isStable = false;
+          if (lastCornersRef.current && lastCornersRef.current.length === 4) {
+            // Calculate maximum normalized displacement across all 4 corners
+            const dists = currentCorners.map((pt, i) => {
+              const prev = lastCornersRef.current![i];
+              const dx = (pt[0] - prev[0]) / imgW;
+              const dy = (pt[1] - prev[1]) / imgH;
+              return Math.sqrt(dx * dx + dy * dy);
+            });
+            const maxMovement = Math.max(...dists);
+            // Stable if max corner movement is less than 8.0% of frame
+            isStable = maxMovement < 0.08;
+          }
+
+          lastCornersRef.current = currentCorners;
+
+          setStableCount((prev) => {
+            const nextCount = isStable ? Math.min(3, prev + 1) : Math.max(1, prev - 1);
+            if (nextCount >= 2) {
+              setDocumentReadyToCapture(true);
+              setLiveStatusText('READY TO SCAN');
+            } else {
+              setDocumentReadyToCapture(false);
+              setLiveStatusText('HOLD STEADY');
+            }
+            return nextCount;
+          });
+        } else {
+          lastCornersRef.current = null;
+          setStableCount(0);
+          setDocumentReadyToCapture(false);
+          setLiveStatusText('ALIGN DOCUMENT');
+        }
+      } catch {
+        // Fallback gracefully on cancelled or network interruption
+      } finally {
+        isDetectingRef.current = false;
+      }
+    }, 180);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+      if (previewAbortRef.current) {
+        previewAbortRef.current.abort();
+        previewAbortRef.current = null;
+      }
+      isDetectingRef.current = false;
+    };
+  }, [isCameraActive, step, isProcessingFrame, videoDimensions]);
+
+  // Map detected corner coordinates to displayed video element with object-fit: contain
+  const renderedOverlay = useMemo(() => {
+    if (!videoRef.current || !liveDetection.detected || !liveDetection.corners || liveDetection.corners.length !== 4) {
+      return null;
+    }
+
+    const video = videoRef.current;
+    const containerW = video.clientWidth;
+    const containerH = video.clientHeight;
+    if (containerW === 0 || containerH === 0) return null;
+
+    const videoW = video.videoWidth || 1280;
+    const videoH = video.videoHeight || 720;
+    const videoRatio = videoW / videoH;
+    const containerRatio = containerW / containerH;
+
+    let renderW = containerW;
+    let renderH = containerH;
+    let offsetX = 0;
+    let offsetY = 0;
+
+    if (videoRatio > containerRatio) {
+      // Letterbox: video fitted to width, black bars on top and bottom
+      renderW = containerW;
+      renderH = containerW / videoRatio;
+      offsetY = (containerH - renderH) / 2;
+    } else {
+      // Pillarbox: video fitted to height, black bars on left and right
+      renderH = containerH;
+      renderW = containerH * videoRatio;
+      offsetX = (containerW - renderW) / 2;
+    }
+
+    const imgW = liveDetection.imageWidth || 480;
+    const imgH = liveDetection.imageHeight || 360;
+
+    const mappedCorners = liveDetection.corners.map(([x, y]) => {
+      const screenX = Math.round(offsetX + (x / imgW) * renderW);
+      const screenY = Math.round(offsetY + (y / imgH) * renderH);
+      return { x: screenX, y: screenY };
+    });
+
+    const pointsStr = mappedCorners.map((pt) => `${pt.x},${pt.y}`).join(' ');
+
+    return {
+      corners: mappedCorners,
+      pointsStr,
+    };
+  }, [liveDetection, videoDimensions]);
 
   // Capture Frame from Video
   const handleCaptureFrame = async () => {
@@ -273,23 +475,61 @@ export function ScanCenterPage() {
         let processedImageUrl: string | undefined = undefined;
 
         try {
+          // Pass stability-verified preview corners as hint mapped to capture frame coordinates
+          let cornersHint: [number, number][] | undefined = undefined;
+          let origCorners: [number, number][] | undefined = undefined;
+          let previewW: number | undefined = undefined;
+          let previewH: number | undefined = undefined;
+
+          if (liveDetection.detected && liveDetection.corners && liveDetection.corners.length === 4) {
+            const sampleW = liveDetection.imageWidth || 480;
+            const sampleH = liveDetection.imageHeight || 270;
+            previewW = sampleW;
+            previewH = sampleH;
+            origCorners = liveDetection.corners;
+
+            // Direct intrinsic image-to-image scaling:
+            // x_capture = x_preview * captureWidth / previewWidth
+            // y_capture = y_preview * captureHeight / previewHeight
+            const scaleX = canvas.width / sampleW;
+            const scaleY = canvas.height / sampleH;
+            cornersHint = liveDetection.corners.map(([x, y]) => [
+              Math.round(x * scaleX),
+              Math.round(y * scaleY),
+            ]);
+          }
+
           const procResult = await processPageWithOpenCVService(blob, {
             examId: selectedExamId,
             answerBookCode: answerBookCode || 'PENDING',
             pageNumber: nextPgNum,
+            corners: cornersHint,
+            originalCorners: origCorners,
+            previewWidth: previewW,
+            previewHeight: previewH,
+            captureWidth: canvas.width,
+            captureHeight: canvas.height,
           });
           if (procResult.serviceAvailable && procResult.diagnostics) {
             finalDiagnostics = procResult.diagnostics;
           }
-          if (procResult.processedBlob) {
-            finalBlob = procResult.processedBlob;
-            if (procResult.processedImageUrl) {
-              URL.revokeObjectURL(rawPreviewUrl);
-              finalPreviewUrl = procResult.processedImageUrl;
-              processedImageUrl = procResult.processedImageUrl;
-            }
-          } else if (procResult.processedImageUrl) {
+          if (procResult.processedImageUrl) {
             processedImageUrl = procResult.processedImageUrl;
+            finalPreviewUrl = procResult.processedImageUrl;
+            if (procResult.processedBlob) {
+              finalBlob = procResult.processedBlob;
+            } else {
+              try {
+                finalBlob = dataUriToBlob(procResult.processedImageUrl);
+              } catch {
+                finalBlob = blob;
+              }
+            }
+            URL.revokeObjectURL(rawPreviewUrl);
+          } else if (procResult.processedBlob) {
+            finalBlob = procResult.processedBlob;
+            finalPreviewUrl = URL.createObjectURL(procResult.processedBlob);
+            URL.revokeObjectURL(rawPreviewUrl);
           }
         } catch {
           // Keep real canvas diagnostics and raw blob fallback
@@ -338,12 +578,23 @@ export function ScanCenterPage() {
     let finalPreviewUrl: string = rawPreviewUrl;
     let processedImageUrl: string | undefined = procResult.processedImageUrl;
 
-    if (procResult.processedBlob) {
-      finalBlob = procResult.processedBlob;
-      if (procResult.processedImageUrl) {
-        URL.revokeObjectURL(rawPreviewUrl);
-        finalPreviewUrl = procResult.processedImageUrl;
+    if (procResult.processedImageUrl) {
+      processedImageUrl = procResult.processedImageUrl;
+      finalPreviewUrl = procResult.processedImageUrl;
+      if (procResult.processedBlob) {
+        finalBlob = procResult.processedBlob;
+      } else {
+        try {
+          finalBlob = dataUriToBlob(procResult.processedImageUrl);
+        } catch {
+          finalBlob = file;
+        }
       }
+      URL.revokeObjectURL(rawPreviewUrl);
+    } else if (procResult.processedBlob) {
+      finalBlob = procResult.processedBlob;
+      finalPreviewUrl = URL.createObjectURL(procResult.processedBlob);
+      URL.revokeObjectURL(rawPreviewUrl);
     }
 
     if (procResult.serviceAvailable && procResult.diagnostics) {
@@ -894,30 +1145,136 @@ export function ScanCenterPage() {
                     </div>
                   )}
 
-                  {/* Real Viewfinder Overlay */}
+                  {/* Dynamic Document Boundary & Viewfinder Mask Overlay */}
                   {isCameraActive && (
-                    <div
+                    <>
+                      {renderedOverlay && (
+                        <svg
                       style={{
                         position: 'absolute',
-                        top: 24,
-                        bottom: 24,
-                        left: 24,
-                        right: 24,
-                        border: '2px dashed rgba(255, 255, 255, 0.5)',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: '100%',
                         pointerEvents: 'none',
-                        boxShadow: '0 0 0 9999px rgba(14, 26, 43, 0.35)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        justifyContent: 'space-between',
+                        zIndex: 10,
                       }}
                     >
-                      <div style={{ padding: 8, color: '#FFFFFF', fontSize: '11px', background: 'rgba(0,0,0,0.6)', width: 'fit-content' }}>
-                        ALIGN PHYSICAL SCRIPT WITHIN RECTANGLE
+                      <defs>
+                        <mask id="viewfinder-cutout">
+                          {/* White base preserves the dimmed perimeter outside the physical sheet */}
+                          <rect width="100%" height="100%" fill="white" />
+                          {/* Transparent cutout where document is detected */}
+                          <polygon points={renderedOverlay.pointsStr} fill="black" />
+                        </mask>
+                      </defs>
+
+                      {/* Outside dimming overlay - dims ONLY outside the physical document */}
+                      <rect
+                        width="100%"
+                        height="100%"
+                        fill={documentReadyToCapture ? 'rgba(10, 20, 35, 0.48)' : 'rgba(10, 20, 35, 0.35)'}
+                        mask="url(#viewfinder-cutout)"
+                      />
+
+                      {/* Real Detected 4-Corner Polygon tracking paper edges */}
+                      <polygon
+                        points={renderedOverlay.pointsStr}
+                        fill={documentReadyToCapture ? 'rgba(16, 185, 129, 0.16)' : 'rgba(245, 158, 11, 0.12)'}
+                        stroke={documentReadyToCapture ? '#10B981' : '#F59E0B'}
+                        strokeWidth={documentReadyToCapture ? '3.5' : '2.5'}
+                        strokeDasharray={documentReadyToCapture ? 'none' : '8 4'}
+                      />
+
+                      {/* Corner Target Handles (TL, TR, BR, BL) */}
+                      {renderedOverlay.corners.map((pt, idx) => (
+                        <g key={idx} transform={`translate(${pt.x}, ${pt.y})`}>
+                          <circle
+                            r={documentReadyToCapture ? 7 : 6}
+                            fill={documentReadyToCapture ? '#10B981' : '#F59E0B'}
+                            stroke="#FFFFFF"
+                            strokeWidth="2"
+                            style={{ filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.6))' }}
+                          />
+                          <circle
+                            r={documentReadyToCapture ? 13 : 10}
+                            fill="none"
+                            stroke={documentReadyToCapture ? 'rgba(16, 185, 129, 0.6)' : 'rgba(245, 158, 11, 0.5)'}
+                            strokeWidth="1.5"
+                          />
+                        </g>
+                      ))}
+                    </svg>
+                  )}
+
+                      {/* Live Guidance Status Badge */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 16,
+                          left: '50%',
+                          transform: 'translateX(-50%)',
+                          zIndex: 12,
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '6px 16px',
+                          borderRadius: '999px',
+                          backgroundColor: documentReadyToCapture
+                            ? 'rgba(6, 78, 59, 0.94)'
+                            : liveDetection.detected
+                            ? 'rgba(120, 53, 15, 0.92)'
+                            : 'rgba(15, 23, 42, 0.88)',
+                          border: `1px solid ${
+                            documentReadyToCapture
+                              ? '#10B981'
+                              : liveDetection.detected
+                              ? '#F59E0B'
+                              : 'rgba(255, 255, 255, 0.25)'
+                          }`,
+                          boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+                          color: '#FFFFFF',
+                          fontSize: '12px',
+                          fontWeight: 600,
+                          letterSpacing: '0.04em',
+                          backdropFilter: 'blur(6px)',
+                          transition: 'all 0.2s ease',
+                          pointerEvents: 'none',
+                        }}
+                      >
+                        <span style={{ fontSize: '10px' }}>
+                          {documentReadyToCapture ? '🟢' : liveDetection.detected ? '🟡' : '⚪'}
+                        </span>
+                        <span>{liveStatusText}</span>
+                        {liveDetection.detected && !documentReadyToCapture && (
+                          <span style={{ fontSize: '10px', opacity: 0.85 }}>({stableCount}/2)</span>
+                        )}
                       </div>
-                      <div style={{ padding: 8, color: '#FFFFFF', fontSize: '11px', background: 'rgba(0,0,0,0.6)', width: 'fit-content', alignSelf: 'flex-end' }}>
-                        PAGE 0{acceptedPages.length + 1}{isExpectedPageCountValid ? ` OF ${parsedExpectedPageCount}` : ''}
+
+                      {/* Sub-label indicator at bottom */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          bottom: 12,
+                          left: 16,
+                          right: 16,
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          color: '#FFFFFF',
+                          fontSize: '11px',
+                          textShadow: '0 1px 3px rgba(0,0,0,0.8)',
+                          pointerEvents: 'none',
+                          zIndex: 11,
+                        }}
+                      >
+                        <span style={{ background: 'rgba(0,0,0,0.5)', padding: '3px 8px', borderRadius: '4px' }}>
+                          {documentReadyToCapture ? 'PAGE LOCKED' : 'ALIGN ANSWER SHEET'}
+                        </span>
+                        <span style={{ background: 'rgba(0,0,0,0.5)', padding: '3px 8px', borderRadius: '4px' }}>
+                          PAGE 0{acceptedPages.length + 1}{isExpectedPageCountValid ? ` OF ${parsedExpectedPageCount}` : ''}
+                        </span>
                       </div>
-                    </div>
+                    </>
                   )}
                 </div>
               )}
@@ -937,11 +1294,26 @@ export function ScanCenterPage() {
                 <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
                   <button
                     className="btn btn-primary"
-                    style={{ padding: '10px 24px', fontSize: 'var(--text-body)' }}
-                    disabled={!isCameraActive || isProcessingFrame}
+                    style={{
+                      padding: '10px 24px',
+                      fontSize: 'var(--text-body)',
+                      backgroundColor: documentReadyToCapture ? '#059669' : undefined,
+                      borderColor: documentReadyToCapture ? '#047857' : undefined,
+                      opacity: documentReadyToCapture ? 1 : 0.65,
+                      cursor: documentReadyToCapture ? 'pointer' : 'not-allowed',
+                      transition: 'all 0.2s ease',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                    }}
+                    disabled={!isCameraActive || isProcessingFrame || !documentReadyToCapture}
                     onClick={handleCaptureFrame}
                   >
-                    {isProcessingFrame ? 'Processing Frame…' : `📸 CAPTURE PAGE 0${acceptedPages.length + 1}`}
+                    {isProcessingFrame
+                      ? 'Processing Full Document…'
+                      : documentReadyToCapture
+                      ? `📸 CAPTURE PAGE 0${acceptedPages.length + 1}`
+                      : `🔍 ALIGN DOCUMENT TO SCAN`}
                   </button>
                 </div>
               </div>
@@ -1003,7 +1375,7 @@ export function ScanCenterPage() {
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                         <img
-                          src={pg.previewUrl}
+                          src={pg.processedImageUrl || pg.previewUrl}
                           alt={`Page ${pg.pageNumber}`}
                           style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 2, border: '1px solid var(--rule)' }}
                         />
@@ -1053,10 +1425,10 @@ export function ScanCenterPage() {
 
           <div className="folio-card__body">
             <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 'var(--space-6)' }}>
-              {/* Captured Image Preview */}
+              {/* Captured Image Preview: Warped, Perspective-Corrected Document */}
               <div>
                 <img
-                  src={currentPendingPage.previewUrl}
+                  src={currentPendingPage.processedImageUrl || currentPendingPage.previewUrl}
                   alt={`Captured Page ${currentPendingPage.pageNumber}`}
                   style={{
                     width: '100%',
@@ -1122,6 +1494,22 @@ export function ScanCenterPage() {
                       <span style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>Page Detection:</span>
                       <strong style={{ fontSize: 'var(--text-metadata)' }}>
                         {currentPendingPage.diagnostics?.pageDetected ? '✓ Bounds Confirmed' : '⚠ Bounds Unclear'}
+                      </strong>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 10px', background: 'var(--parchment-panel)', borderRadius: 2 }}>
+                      <span style={{ fontSize: 'var(--text-metadata)', color: 'var(--text-muted)' }}>Perspective Rectification:</span>
+                      <strong
+                        style={{
+                          fontSize: 'var(--text-metadata)',
+                          color: currentPendingPage.diagnostics?.cropReady
+                            ? 'var(--status-approved-text)'
+                            : 'var(--status-review-text)',
+                        }}
+                      >
+                        {currentPendingPage.diagnostics?.cropReady
+                          ? `✓ Warped (${currentPendingPage.diagnostics.outputWidth || 'Rectified'}×${currentPendingPage.diagnostics.outputHeight || 'Doc'} px)`
+                          : 'Full Frame'}
                       </strong>
                     </div>
 
@@ -1244,7 +1632,7 @@ export function ScanCenterPage() {
                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
                       <img
-                        src={pg.previewUrl}
+                        src={pg.processedImageUrl || pg.previewUrl}
                         alt={`Page ${pg.pageNumber}`}
                         style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 2, border: '1px solid var(--rule)' }}
                       />

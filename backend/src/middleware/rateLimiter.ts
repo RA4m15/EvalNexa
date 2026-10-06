@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -18,7 +18,7 @@ export const aiAssistantLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req: any) => {
-    return req.user?._id?.toString() || req.ip || 'anonymous';
+    return req.user?._id?.toString() || ipKeyGenerator(req.ip);
   },
   message: {
     success: false,
