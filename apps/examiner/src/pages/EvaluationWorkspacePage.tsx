@@ -20,6 +20,9 @@ export function EvaluationWorkspacePage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [zoomScale, setZoomScale] = useState(100);
   const [viewMode, setViewMode] = useState<'SCRIPT_ONLY' | 'SPLIT' | 'TEXT_ONLY'>('SCRIPT_ONLY');
+  const [showThumbnails, setShowThumbnails] = useState(false);
+  const [isEditingMapping, setIsEditingMapping] = useState(false);
+  const [mappingInput, setMappingInput] = useState('');
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [saveStatus, setSaveStatus] = useState<'IDLE' | 'SAVING' | 'SAVED' | 'ERROR'>('IDLE');
@@ -163,6 +166,49 @@ export function EvaluationWorkspacePage() {
     }
     setCurrentCommentInput(activeMarkItem.comment || '');
   }, [activeQIndex, activeMarkItem.status, activeMarkItem.marks, activeMarkItem.comment]);
+
+  // Auto-jump to the first page mapped to the currently active question
+  useEffect(() => {
+    if (!activeQuestion) return;
+    const mapping = answerBook?.questionPageMapping?.find(
+      (m) => m.questionNumber === activeQuestion.questionNumber
+    );
+    if (mapping?.pages && mapping.pages.length > 0) {
+      setCurrentPage(mapping.pages[0]);
+    }
+  }, [activeQIndex, activeQuestion?.questionNumber, answerBook?.questionPageMapping]);
+
+  const handleSaveMapping = async () => {
+    if (!activeQuestion) return;
+    try {
+      const parsedPages: number[] = [];
+      const tokens = mappingInput.split(/[, ]+/).filter(Boolean);
+      for (const token of tokens) {
+        if (token.includes('-')) {
+          const [startStr, endStr] = token.split('-');
+          const start = parseInt(startStr, 10);
+          const end = parseInt(endStr, 10);
+          if (!isNaN(start) && !isNaN(end) && start <= end) {
+            for (let i = start; i <= end; i++) parsedPages.push(i);
+          }
+        } else {
+          const n = parseInt(token, 10);
+          if (!isNaN(n) && n > 0) parsedPages.push(n);
+        }
+      }
+      const uniquePages = Array.from(new Set(parsedPages)).sort((a, b) => a - b);
+      if (uniquePages.length === 0) return;
+
+      await apiClient.patch(`/answer-books/${id}/question-mapping`, {
+        questionNumber: activeQuestion.questionNumber,
+        pages: uniquePages,
+      });
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      setIsEditingMapping(false);
+    } catch (err: any) {
+      console.error('Failed to update question page mapping:', err);
+    }
+  };
 
   // Mutation: Begin evaluation session
   const startMutation = useMutation({
@@ -800,6 +846,7 @@ export function EvaluationWorkspacePage() {
               </button>
               <button
                 onClick={() => setZoomScale(100)}
+                title="Fit Width (100%)"
                 style={{
                   fontFamily: 'Cambria',
                   fontSize: 12,
@@ -810,8 +857,183 @@ export function EvaluationWorkspacePage() {
                   cursor: 'pointer',
                 }}
               >
-                Fit
+                Fit Width
               </button>
+              <button
+                onClick={() => setZoomScale(85)}
+                title="Fit Page (85%)"
+                style={{
+                  fontFamily: 'Cambria',
+                  fontSize: 12,
+                  padding: '4px 8px',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  cursor: 'pointer',
+                }}
+              >
+                Fit Page
+              </button>
+              <div style={{ height: 16, width: 1, background: 'rgba(255,255,255,0.2)', margin: '0 4px' }} />
+              <button
+                onClick={() => setShowThumbnails((s) => !s)}
+                style={{
+                  fontFamily: 'Cambria',
+                  fontSize: 12,
+                  padding: '4px 8px',
+                  background: showThumbnails ? 'var(--gold)' : 'rgba(255,255,255,0.1)',
+                  color: showThumbnails ? 'var(--navy)' : '#ffffff',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  cursor: 'pointer',
+                  fontWeight: showThumbnails ? 700 : 500,
+                }}
+              >
+                📑 Thumbnails
+              </button>
+              <button
+                onClick={() => {
+                  if (!document.fullscreenElement) {
+                    document.documentElement.requestFullscreen?.();
+                  } else {
+                    document.exitFullscreen?.();
+                  }
+                }}
+                style={{
+                  fontFamily: 'Cambria',
+                  fontSize: 12,
+                  padding: '4px 8px',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#ffffff',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  cursor: 'pointer',
+                }}
+              >
+                ⛶ Fullscreen
+              </button>
+            </div>
+          </div>
+
+          {/* Question-to-Page Navigation Bar */}
+          <div
+            style={{
+              padding: '6px 16px',
+              background: '#15181f',
+              borderBottom: '1px solid rgba(255,255,255,0.08)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              fontSize: 12,
+              color: '#cbd5e1',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ color: 'var(--gold)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Q{activeQuestion.questionNumber} Answer Pages:
+              </span>
+              {(() => {
+                const mapping = answerBook.questionPageMapping?.find(
+                  (m) => m.questionNumber === activeQuestion.questionNumber
+                );
+                const mappedPages = mapping?.pages && mapping.pages.length > 0 ? mapping.pages : [currentPage];
+
+                return (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    {mappedPages.map((pageNum) => (
+                      <button
+                        key={pageNum}
+                        onClick={() => setCurrentPage(pageNum)}
+                        style={{
+                          fontFamily: 'Cambria',
+                          fontSize: 12,
+                          padding: '2px 8px',
+                          background: currentPage === pageNum ? 'var(--gold)' : 'rgba(255,255,255,0.1)',
+                          color: currentPage === pageNum ? 'var(--navy)' : '#ffffff',
+                          border: '1px solid rgba(255,255,255,0.2)',
+                          fontWeight: currentPage === pageNum ? 700 : 500,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Page {pageNum}
+                      </button>
+                    ))}
+                    <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 4 }}>
+                      ({mappedPages.length} {mappedPages.length === 1 ? 'page' : 'pages'} for this answer)
+                    </span>
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Examiner Mapping Override Control */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {isEditingMapping ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    type="text"
+                    value={mappingInput}
+                    onChange={(e) => setMappingInput(e.target.value)}
+                    placeholder="e.g. 1-3, 5"
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 12,
+                      padding: '2px 8px',
+                      background: '#ffffff',
+                      color: '#000000',
+                      border: '1px solid var(--border)',
+                      width: 110,
+                    }}
+                  />
+                  <button
+                    onClick={handleSaveMapping}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      padding: '2px 8px',
+                      background: 'var(--navy)',
+                      color: '#ffffff',
+                      border: '1px solid rgba(255,255,255,0.3)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => setIsEditingMapping(false)}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      padding: '2px 6px',
+                      background: 'transparent',
+                      color: '#94a3b8',
+                      border: 'none',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => {
+                    const mapping = answerBook.questionPageMapping?.find(
+                      (m) => m.questionNumber === activeQuestion.questionNumber
+                    );
+                    setMappingInput(mapping?.pages ? mapping.pages.join(', ') : String(currentPage));
+                    setIsEditingMapping(true);
+                  }}
+                  style={{
+                    fontFamily: 'Cambria',
+                    fontSize: 11,
+                    padding: '2px 8px',
+                    background: 'rgba(255,255,255,0.08)',
+                    color: '#cbd5e1',
+                    border: '1px solid rgba(255,255,255,0.2)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✎ Adjust Pages
+                </button>
+              )}
             </div>
           </div>
 
@@ -877,13 +1099,13 @@ export function EvaluationWorkspacePage() {
                   >
                     {pageMedia.format === 'pdf' ? (
                       <iframe
-                        src={pageMedia.secureUrl}
+                        src={pageMedia.secureUrl.startsWith('http') ? pageMedia.secureUrl : `${(apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '')}${pageMedia.secureUrl}`}
                         title={`Script Page ${currentPage}`}
                         style={{ width: '100%', height: '750px', border: 'none' }}
                       />
                     ) : (
                       <img
-                        src={pageMedia.secureUrl}
+                        src={pageMedia.secureUrl.startsWith('http') ? pageMedia.secureUrl : `${(apiClient.defaults.baseURL || '').replace(/\/api\/?$/, '')}${pageMedia.secureUrl}`}
                         alt={`Answer Script Page ${currentPage}`}
                         style={{ width: '100%', height: 'auto', display: 'block' }}
                       />
@@ -963,6 +1185,65 @@ export function EvaluationWorkspacePage() {
               </div>
             )}
           </div>
+
+          {/* Bottom Thumbnails Strip (48 Pages) */}
+          {showThumbnails && (
+            <div
+              style={{
+                height: 96,
+                background: '#15181f',
+                borderTop: '1px solid rgba(255,255,255,0.12)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '0 16px',
+                overflowX: 'auto',
+                flexShrink: 0,
+              }}
+            >
+              {Array.from({ length: totalPagesCount }, (_, i) => i + 1).map((pNum) => {
+                const mapping = answerBook.questionPageMapping?.find(
+                  (m) => m.questionNumber === activeQuestion.questionNumber
+                );
+                const isMappedToActiveQ = mapping?.pages?.includes(pNum);
+                const isSelected = currentPage === pNum;
+
+                return (
+                  <button
+                    key={pNum}
+                    onClick={() => setCurrentPage(pNum)}
+                    title={`Go to Page ${pNum}`}
+                    style={{
+                      flexShrink: 0,
+                      width: 52,
+                      height: 72,
+                      background: isSelected ? 'var(--gold)' : '#252932',
+                      border: isSelected
+                        ? '2px solid var(--gold)'
+                        : isMappedToActiveQ
+                        ? '2px solid rgba(212, 175, 55, 0.7)'
+                        : '1px solid rgba(255,255,255,0.15)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      cursor: 'pointer',
+                      color: isSelected ? 'var(--navy)' : '#ffffff',
+                      fontFamily: 'Cambria',
+                      padding: 0,
+                    }}
+                  >
+                    <span style={{ fontSize: 12, fontWeight: 700 }}>P.{pNum}</span>
+                    {isMappedToActiveQ && (
+                      <span style={{ fontSize: 10, opacity: 0.9, fontWeight: 600 }}>
+                        Q{activeQuestion.questionNumber}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* ============================================================ */}

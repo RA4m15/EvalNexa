@@ -10,7 +10,7 @@ export function LoginPage() {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  if (user) { return <Navigate to="/dashboard" replace />; }
+  if (user && (user.role === 'MODERATOR' || user.role === 'ADMIN')) { return <Navigate to="/dashboard" replace />; }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
