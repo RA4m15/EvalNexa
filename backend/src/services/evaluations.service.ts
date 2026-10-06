@@ -3,6 +3,7 @@ import { Evaluation, IEvaluation, IEvaluationQuestionMark } from '../models/Eval
 import { AnswerBook, IQuestionPageMapping } from '../models/AnswerBook';
 import { AnswerPage } from '../models/AnswerPage';
 import { Question } from '../models/Question';
+import { QuestionPaper } from '../models/QuestionPaper';
 import { Exam } from '../models/Exam';
 import { validateStateTransition } from './answerBooks.service';
 import { logAuditAction } from './audit.service';
@@ -724,9 +725,47 @@ export async function requestAISuggestionForQuestion(
     throw error;
   }
 
-  const question = await Question.findOne({ examId, questionNumber });
-  if (!question) {
-    const error: any = new Error(`Question Q${questionNumber} not found for this examination`);
+  let targetQuestionText = '';
+  let targetMaximumMarks = 0;
+  let targetRubric: Array<{ criterion: string; marks: number }> = [];
+  let targetReferenceAnswer: string | undefined = undefined;
+  let targetKeyConcepts: string[] | undefined = undefined;
+  let targetGradingNotes: string | undefined = undefined;
+  let targetLanguage: string | undefined = undefined;
+
+  // 4a. Check QuestionPaper if associated with AnswerBook
+  if (answerBook.questionPaperId) {
+    const qp = await QuestionPaper.findById(answerBook.questionPaperId);
+    if (qp) {
+      const qList = qp.verifiedQuestions && qp.verifiedQuestions.length > 0
+        ? qp.verifiedQuestions
+        : qp.extractedQuestions;
+      const qMatch = qList?.find((q) => q.questionNumber === questionNumber);
+      if (qMatch) {
+        targetQuestionText = qMatch.text;
+        targetMaximumMarks = qMatch.maximumMarks;
+        targetRubric = qMatch.rubric || [];
+        targetReferenceAnswer = qMatch.referenceAnswer;
+      }
+    }
+  }
+
+  // 4b. Fallback to Question collection
+  if (!targetQuestionText) {
+    const question = await Question.findOne({ examId, questionNumber });
+    if (question) {
+      targetQuestionText = question.text;
+      targetMaximumMarks = question.maximumMarks;
+      targetRubric = question.rubric.map((r) => ({ criterion: r.criterion, marks: r.marks }));
+      targetReferenceAnswer = question.referenceAnswer;
+      targetKeyConcepts = question.keyConcepts;
+      targetGradingNotes = question.gradingNotes;
+      targetLanguage = question.evaluationLanguage;
+    }
+  }
+
+  if (!targetQuestionText) {
+    const error: any = new Error(`Question Q${questionNumber} not found for this examination or question paper`);
     error.status = 404;
     error.code = 'QUESTION_NOT_FOUND';
     throw error;
@@ -850,16 +889,13 @@ export async function requestAISuggestionForQuestion(
 
   // 6. Call EvaluationAssistantService with all multi-page images and OCR
   const assistantResult = await EvaluationAssistantService.evaluateStudentAnswer({
-    question: question.text,
-    maximumMarks: question.maximumMarks,
-    rubric: question.rubric.map((r) => ({
-      criterion: r.criterion,
-      marks: r.marks,
-    })),
-    referenceAnswer: question.referenceAnswer,
-    keyConcepts: question.keyConcepts,
-    gradingNotes: question.gradingNotes,
-    language: question.evaluationLanguage,
+    question: targetQuestionText,
+    maximumMarks: targetMaximumMarks,
+    rubric: targetRubric,
+    referenceAnswer: targetReferenceAnswer,
+    keyConcepts: targetKeyConcepts,
+    gradingNotes: targetGradingNotes,
+    language: targetLanguage,
     studentAnswerImages: studentImages,
     studentAnswerImageMimeType: 'image/jpeg',
     ocrText: ocrParts.join('\n\n'),

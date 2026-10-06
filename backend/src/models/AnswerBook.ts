@@ -82,6 +82,8 @@ export interface IAnswerBook extends Document {
   };
   assignedExaminerId?: mongoose.Types.ObjectId;
   questionPageMapping?: IQuestionPageMapping[];
+  questionPaperId?: mongoose.Types.ObjectId;
+  paperSet?: string;
   createdAt: Date;
   updatedAt: Date;
   transitionProcessingStatus(newStatus: ProcessingStatus): void;
@@ -161,6 +163,16 @@ const AnswerBookSchema = new Schema<IAnswerBook>(
       ref: 'User',
       default: null,
       index: true,
+    },
+    questionPaperId: {
+      type: Schema.Types.ObjectId,
+      ref: 'QuestionPaper',
+      default: null,
+      index: true,
+    },
+    paperSet: {
+      type: String,
+      trim: true,
     },
     questionPageMapping: [
       {

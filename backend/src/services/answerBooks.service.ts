@@ -87,7 +87,8 @@ export async function fetchExaminerAnswerBooks(userId: string, status?: string) 
 export async function fetchAnswerBookById(id: string, userRole: string, userId: string) {
   const answerBook = await AnswerBook.findById(id)
     .populate('examId', 'title subjectCode subjectName maximumMarks totalQuestions')
-    .populate('assignedExaminerId', 'name email');
+    .populate('assignedExaminerId', 'name email')
+    .populate('questionPaperId');
 
   if (!answerBook) {
     const error: any = new Error('Answer book not found');

@@ -121,6 +121,17 @@ export function buildDocumentPublicId(
 }
 
 /**
+ * Builds predictable public ID for question-paper documents
+ */
+export function buildQuestionPaperPublicId(
+  examId: string,
+  paperSet: string = 'Default'
+): string {
+  const safeSet = paperSet.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  return `evalnexa/exams/${examId}/question-papers/set-${safeSet}-${Date.now()}`;
+}
+
+/**
  * Uploads a buffer directly to Cloudinary using upload_stream
  */
 export async function uploadMediaBuffer(

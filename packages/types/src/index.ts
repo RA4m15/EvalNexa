@@ -137,6 +137,8 @@ export interface AnswerBook {
   };
   assignedExaminerId?: string | User;
   questionPageMapping?: QuestionPageMapping[];
+  questionPaperId?: string | QuestionPaper;
+  paperSet?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -217,6 +219,45 @@ export interface Question {
   keyConcepts?: string[];
   gradingNotes?: string;
   evaluationLanguage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// --- Question Paper ---
+export type QuestionPaperStatus = 'NOT_EXTRACTED' | 'EXTRACTED' | 'VERIFIED' | 'ERROR';
+
+export interface ExtractedQuestion {
+  questionNumber: number;
+  section?: string;
+  subquestion?: string;
+  text: string;
+  maximumMarks: number;
+  rubric?: QuestionRubricItem[];
+  referenceAnswer?: string;
+  choice?: string;
+  verified?: boolean;
+}
+
+export interface QuestionPaper {
+  _id: string;
+  examId: string | Exam;
+  paperSet: string;
+  originalFileName: string;
+  cloudinaryPublicId: string;
+  secureUrl?: string;
+  resourceType: string;
+  format?: string;
+  pageCount: number;
+  processingStatus: 'RECEIVED' | 'PROCESSING' | 'COMPLETED' | 'ERROR';
+  extractionStatus: QuestionPaperStatus;
+  rawOcrText?: string;
+  extractedQuestions: ExtractedQuestion[];
+  verifiedQuestions: ExtractedQuestion[];
+  totalQuestions: number;
+  maximumMarks: number;
+  verifiedBy?: string | User;
+  verifiedAt?: string;
+  createdBy: string | User;
   createdAt: string;
   updatedAt: string;
 }

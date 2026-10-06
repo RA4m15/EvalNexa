@@ -2,7 +2,18 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../lib/apiClient';
-import { AnswerBook, Evaluation, Exam, Question, QuestionMarkItem, QuestionMarkStatus, QuestionMarkAiAnalysis } from '@evalnexa/types';
+import { API_BASE_URL } from '../lib/config';
+import {
+  AnswerBook,
+  Evaluation,
+  Exam,
+  Question,
+  QuestionMarkItem,
+  QuestionMarkStatus,
+  QuestionMarkAiAnalysis,
+  QuestionPaper,
+  ExtractedQuestion,
+} from '@evalnexa/types';
 import { getSocket } from '../lib/socket';
 
 interface WorkspaceData {
@@ -26,6 +37,14 @@ export function EvaluationWorkspacePage() {
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [saveStatus, setSaveStatus] = useState<'IDLE' | 'SAVING' | 'SAVED' | 'ERROR'>('IDLE');
+
+  // Question Paper Modal State
+  const [showQuestionPaperModal, setShowQuestionPaperModal] = useState(false);
+  const [paperModalStep, setPaperModalStep] = useState<'UPLOAD' | 'EXTRACTING' | 'REVIEW' | 'VIEW'>('UPLOAD');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [paperSetInput, setPaperSetInput] = useState('Set A');
+  const [uploadError, setUploadError] = useState('');
+  const [editableQuestions, setEditableQuestions] = useState<ExtractedQuestion[]>([]);
 
   // Active question inputs
   const [currentMarkInput, setCurrentMarkInput] = useState('');
@@ -94,7 +113,25 @@ export function EvaluationWorkspacePage() {
     };
   }, [id, evaluation?._id, queryClient]);
 
-  // Load Exam Questions
+  // Load Question Paper for this AnswerBook (or latest Exam set)
+  const {
+    data: questionPaper,
+    isLoading: isLoadingQuestionPaper,
+    refetch: refetchQuestionPaper,
+  } = useQuery<QuestionPaper | null>({
+    queryKey: ['question-paper', id],
+    queryFn: async () => {
+      try {
+        const res = await apiClient.get(`/question-papers/answer-book/${id}`);
+        return res.data.data;
+      } catch {
+        return null;
+      }
+    },
+    enabled: Boolean(id),
+  });
+
+  // Load Exam Questions (legacy/default)
   const { data: questions = [] } = useQuery<Question[]>({
     queryKey: ['exam-questions', examId],
     queryFn: async () => {
@@ -104,24 +141,203 @@ export function EvaluationWorkspacePage() {
     enabled: Boolean(examId),
   });
 
-  // Canonical question list
-  const totalQuestionsCount = Math.max(questions.length, exam?.totalQuestions || 1);
+  // Canonical question list: Prioritize verified QuestionPaper!
   const activeQuestions: Question[] = useMemo(() => {
+    // 1. Authoritative: Verified QuestionPaper questions
+    if (questionPaper?.verifiedQuestions && questionPaper.verifiedQuestions.length > 0) {
+      return questionPaper.verifiedQuestions.map((vq) => ({
+        _id: `qp-v-${vq.questionNumber}`,
+        examId: examId,
+        questionNumber: vq.questionNumber,
+        text: vq.text,
+        maximumMarks: vq.maximumMarks,
+        rubric:
+          vq.rubric && vq.rubric.length > 0
+            ? vq.rubric
+            : [
+                { criterion: 'Core answer & understanding', marks: Math.round(vq.maximumMarks * 0.6) },
+                { criterion: 'Accuracy & methodology', marks: Math.round(vq.maximumMarks * 0.4) },
+              ],
+        referenceAnswer: vq.referenceAnswer,
+        createdAt: '',
+        updatedAt: '',
+      }));
+    }
+
+    // 2. Extracted (unverified) QuestionPaper questions if present and no exam questions
+    if (
+      questionPaper?.extractedQuestions &&
+      questionPaper.extractedQuestions.length > 0 &&
+      questions.length === 0
+    ) {
+      return questionPaper.extractedQuestions.map((eq) => ({
+        _id: `qp-ext-${eq.questionNumber}`,
+        examId: examId,
+        questionNumber: eq.questionNumber,
+        text: eq.text,
+        maximumMarks: eq.maximumMarks,
+        rubric:
+          eq.rubric && eq.rubric.length > 0
+            ? eq.rubric
+            : [
+                { criterion: 'Core answer & understanding', marks: Math.round(eq.maximumMarks * 0.6) },
+                { criterion: 'Accuracy & methodology', marks: Math.round(eq.maximumMarks * 0.4) },
+              ],
+        referenceAnswer: eq.referenceAnswer,
+        createdAt: '',
+        updatedAt: '',
+      }));
+    }
+
+    // 3. Fallback to exam questions from DB
     if (questions.length > 0) return questions;
-    return Array.from({ length: totalQuestionsCount }, (_, i) => ({
+
+    // 4. Default template
+    const count = exam?.totalQuestions || 1;
+    return Array.from({ length: count }, (_, i) => ({
       _id: `q-${i + 1}`,
       examId: examId,
       questionNumber: i + 1,
       text: `Question ${i + 1} Examination Statement`,
-      maximumMarks: exam?.maximumMarks ? Math.round((exam.maximumMarks / totalQuestionsCount) * 10) / 10 : 10,
+      maximumMarks: exam?.maximumMarks ? Math.round((exam.maximumMarks / count) * 10) / 10 : 10,
       rubric: [
-        { criterion: 'Conceptual understanding & method', marks: exam?.maximumMarks ? Math.round(exam.maximumMarks / totalQuestionsCount * 0.6) : 6 },
-        { criterion: 'Execution & correctness', marks: exam?.maximumMarks ? Math.round(exam.maximumMarks / totalQuestionsCount * 0.4) : 4 },
+        { criterion: 'Conceptual understanding & method', marks: exam?.maximumMarks ? Math.round((exam.maximumMarks / count) * 0.6) : 6 },
+        { criterion: 'Execution & correctness', marks: exam?.maximumMarks ? Math.round((exam.maximumMarks / count) * 0.4) : 4 },
       ],
       createdAt: '',
       updatedAt: '',
     }));
-  }, [questions, totalQuestionsCount, examId, exam?.maximumMarks]);
+  }, [questionPaper, questions, examId, exam?.maximumMarks, exam?.totalQuestions]);
+
+  // Mutation: Upload Question Paper
+  const uploadPaperMutation = useMutation({
+    mutationFn: async ({ file, paperSet }: { file: File; paperSet: string }) => {
+      setUploadError('');
+      setPaperModalStep('EXTRACTING');
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('examId', examId);
+      formData.append('answerBookId', id!);
+      formData.append('paperSet', paperSet);
+
+      const res = await apiClient.post('/question-papers/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      return res.data.data as QuestionPaper;
+    },
+    onSuccess: (data) => {
+      setSelectedFile(null);
+      queryClient.invalidateQueries({ queryKey: ['question-paper', id] });
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      queryClient.invalidateQueries({ queryKey: ['exam-questions', examId] });
+      setEditableQuestions(
+        data.extractedQuestions && data.extractedQuestions.length > 0
+          ? data.extractedQuestions
+          : []
+      );
+      setPaperModalStep('REVIEW');
+    },
+    onError: (err: any) => {
+      let msg = err.response?.data?.message || err.message || 'Question paper upload failed';
+      if (err.response?.status === 404) {
+        msg = `API Endpoint Not Found (404): The question paper endpoint (${err.config?.url || '/question-papers/upload'}) was not found on the backend API server (${API_BASE_URL}). Please verify that the latest backend routes are deployed to production.`;
+      } else if (err.response?.data?.code) {
+        msg = `${msg} [Code: ${err.response.data.code}]`;
+      }
+      setUploadError(msg);
+      setPaperModalStep('UPLOAD');
+    },
+  });
+
+  // Mutation: Verify Question Paper
+  const verifyPaperMutation = useMutation({
+    mutationFn: async (questionsList: ExtractedQuestion[]) => {
+      if (!questionPaper) throw new Error('No active question paper to verify');
+      const res = await apiClient.post(`/question-papers/${questionPaper._id}/verify`, {
+        questions: questionsList,
+        answerBookId: id,
+      });
+      return res.data.data as QuestionPaper;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['question-paper', id] });
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      queryClient.invalidateQueries({ queryKey: ['exam-questions', examId] });
+      setShowQuestionPaperModal(false);
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.message || err.message || 'Failed to verify question paper');
+    },
+  });
+
+  const handleOpenQuestionPaperModal = (step?: 'UPLOAD' | 'REVIEW' | 'VIEW') => {
+    setUploadError('');
+    setSelectedFile(null);
+    if (step) {
+      if (step === 'REVIEW') {
+        const initial =
+          questionPaper?.verifiedQuestions && questionPaper.verifiedQuestions.length > 0
+            ? questionPaper.verifiedQuestions
+            : questionPaper?.extractedQuestions || [];
+        setEditableQuestions(initial);
+      }
+      setPaperModalStep(step);
+    } else if (questionPaper?.extractionStatus === 'VERIFIED') {
+      setEditableQuestions(questionPaper.verifiedQuestions || []);
+      setPaperModalStep('VIEW');
+    } else if (questionPaper?.extractionStatus === 'EXTRACTED') {
+      setEditableQuestions(questionPaper.extractedQuestions || []);
+      setPaperModalStep('REVIEW');
+    } else {
+      setPaperModalStep('UPLOAD');
+    }
+    setShowQuestionPaperModal(true);
+  };
+
+  const handleUpdateEditableQuestion = (index: number, field: keyof ExtractedQuestion, val: any) => {
+    setEditableQuestions((prev) => {
+      const copy = [...prev];
+      copy[index] = { ...copy[index], [field]: val };
+      return copy;
+    });
+  };
+
+  const handleAddQuestionRow = () => {
+    setEditableQuestions((prev) => [
+      ...prev,
+      {
+        questionNumber: prev.length + 1,
+        text: 'New question statement',
+        maximumMarks: 10,
+        section: 'Section A',
+        rubric: [
+          { criterion: 'Core answer & understanding', marks: 6 },
+          { criterion: 'Accuracy & methodology', marks: 4 },
+        ],
+        verified: false,
+      },
+    ]);
+  };
+
+  const handleDeleteQuestionRow = (index: number) => {
+    setEditableQuestions((prev) => {
+      const copy = prev.filter((_, i) => i !== index);
+      return copy.map((q, i) => ({ ...q, questionNumber: i + 1 }));
+    });
+  };
+
+  const handleSaveAndVerify = () => {
+    if (editableQuestions.length === 0) {
+      alert('Please add at least one question.');
+      return;
+    }
+    const hasEmptyText = editableQuestions.some((q) => !q.text || q.text.trim().length === 0);
+    if (hasEmptyText) {
+      alert('All questions must have a non-empty question statement.');
+      return;
+    }
+    verifyPaperMutation.mutate(editableQuestions);
+  };
 
   // Synchronize initial marks state from backend
   useEffect(() => {
@@ -497,6 +713,50 @@ export function EvaluationWorkspacePage() {
               (Roll: {answerBook.studentCode})
             </span>
           </div>
+
+          <div style={{ height: 20, width: 1, background: 'var(--border)' }} />
+
+          {/* Prominent Question Paper Action in Header */}
+          <button
+            type="button"
+            className={questionPaper ? 'btn btn-secondary' : 'btn btn-primary'}
+            style={{
+              fontSize: 12,
+              padding: '5px 12px',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              background:
+                questionPaper?.extractionStatus === 'VERIFIED'
+                  ? 'rgba(21, 128, 61, 0.1)'
+                  : questionPaper?.extractionStatus === 'EXTRACTED'
+                  ? 'rgba(180, 83, 9, 0.1)'
+                  : undefined,
+              borderColor:
+                questionPaper?.extractionStatus === 'VERIFIED'
+                  ? '#15803d'
+                  : questionPaper?.extractionStatus === 'EXTRACTED'
+                  ? '#b45309'
+                  : undefined,
+              color:
+                questionPaper?.extractionStatus === 'VERIFIED'
+                  ? '#15803d'
+                  : questionPaper?.extractionStatus === 'EXTRACTED'
+                  ? '#b45309'
+                  : undefined,
+            }}
+            onClick={() => handleOpenQuestionPaperModal()}
+          >
+            {questionPaper?.extractionStatus === 'VERIFIED' ? (
+              <>✓ Question Paper ({questionPaper.paperSet || 'Active'})</>
+            ) : questionPaper?.extractionStatus === 'EXTRACTED' ? (
+              <>⚠ Review Question Paper ({questionPaper.totalQuestions} Qs)</>
+            ) : (
+              <>+ ADD QUESTION PAPER</>
+            )}
+          </button>
+
           <div style={{ height: 20, width: 1, background: 'var(--border)' }} />
           <div style={{ fontSize: 14, color: 'var(--charcoal)' }}>
             Exam: <strong>{exam ? exam.title : 'Examination'}</strong> ({exam?.subjectCode})
@@ -934,7 +1194,10 @@ export function EvaluationWorkspacePage() {
                 const mapping = answerBook.questionPageMapping?.find(
                   (m) => m.questionNumber === activeQuestion.questionNumber
                 );
-                const mappedPages = mapping?.pages && mapping.pages.length > 0 ? mapping.pages : [currentPage];
+                const hasExplicitMapping = Boolean(mapping?.pages && mapping.pages.length > 0);
+                const mappedPages = hasExplicitMapping
+                  ? mapping!.pages
+                  : Array.from({ length: totalPagesCount }, (_, i) => i + 1);
 
                 return (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -957,7 +1220,7 @@ export function EvaluationWorkspacePage() {
                       </button>
                     ))}
                     <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 4 }}>
-                      ({mappedPages.length} {mappedPages.length === 1 ? 'page' : 'pages'} for this answer)
+                      ({hasExplicitMapping ? `${mappedPages.length} ${mappedPages.length === 1 ? 'page' : 'pages'} for this answer` : `All ${totalPagesCount} pages available (unmapped)`})
                     </span>
                   </div>
                 );
@@ -1296,6 +1559,141 @@ export function EvaluationWorkspacePage() {
               </button>
             </div>
           )}
+
+          {/* ============================================================ */}
+          {/* PERSISTENT QUESTION PAPER STATUS CARD */}
+          {/* ============================================================ */}
+          <div
+            style={{
+              background: '#ffffff',
+              border: '1px solid var(--border)',
+              borderLeft:
+                questionPaper?.extractionStatus === 'VERIFIED'
+                  ? '4px solid #15803d'
+                  : questionPaper?.extractionStatus === 'EXTRACTED'
+                  ? '4px solid #b45309'
+                  : '4px solid var(--gold)',
+              padding: '14px 16px',
+              marginBottom: 16,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.1em', color: 'var(--gold)', fontWeight: 700 }}>
+                QUESTION PAPER
+              </span>
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  padding: '2px 8px',
+                  background:
+                    questionPaper?.extractionStatus === 'VERIFIED'
+                      ? 'rgba(21, 128, 61, 0.12)'
+                      : questionPaper?.extractionStatus === 'EXTRACTED'
+                      ? 'rgba(180, 83, 9, 0.12)'
+                      : 'rgba(14, 26, 43, 0.08)',
+                  color:
+                    questionPaper?.extractionStatus === 'VERIFIED'
+                      ? '#15803d'
+                      : questionPaper?.extractionStatus === 'EXTRACTED'
+                      ? '#b45309'
+                      : 'var(--navy)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                {questionPaper?.extractionStatus === 'VERIFIED'
+                  ? 'Status: Verified'
+                  : questionPaper?.extractionStatus === 'EXTRACTED'
+                  ? 'Status: Extracted'
+                  : 'Status: Not Added'}
+              </span>
+            </div>
+
+            {!questionPaper ? (
+              <div>
+                <p style={{ fontSize: 13, color: 'var(--charcoal)', margin: '0 0 10px 0', lineHeight: 1.4 }}>
+                  The question paper is required for AI-assisted evaluation.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ width: '100%', fontSize: 13, padding: '7px 12px', justifyContent: 'center' }}
+                  onClick={() => handleOpenQuestionPaperModal('UPLOAD')}
+                >
+                  + ADD QUESTION PAPER
+                </button>
+              </div>
+            ) : questionPaper.extractionStatus === 'EXTRACTED' ? (
+              <div>
+                <div style={{ fontSize: 13, color: '#15803d', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  ✓ {questionPaper.totalQuestions} Questions Extracted
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--charcoal)', marginBottom: 2 }}>
+                  ✓ Total Marks: {questionPaper.maximumMarks}
+                </div>
+                <div style={{ fontSize: 12, color: '#b45309', fontWeight: 600, marginBottom: 10 }}>
+                  Ready for Review ({questionPaper.paperSet || 'Set A'})
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    style={{ flex: 1, fontSize: 12, padding: '6px 10px', justifyContent: 'center' }}
+                    onClick={() => handleOpenQuestionPaperModal('REVIEW')}
+                  >
+                    REVIEW & VERIFY
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ fontSize: 12, padding: '6px 10px' }}
+                    onClick={() => handleOpenQuestionPaperModal('VIEW')}
+                  >
+                    VIEW
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 13, color: '#15803d', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                  ✓ {questionPaper.verifiedQuestions?.length || questionPaper.totalQuestions} Questions Verified
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--charcoal)', marginBottom: 2 }}>
+                  ✓ Total Marks: {questionPaper.maximumMarks}
+                </div>
+                <div style={{ fontSize: 12, color: '#15803d', fontWeight: 600, marginBottom: 10 }}>
+                  Active Paper: {questionPaper.paperSet || 'Default'}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ flex: 1, fontSize: 12, padding: '6px 10px', justifyContent: 'center' }}
+                    onClick={() => handleOpenQuestionPaperModal('VIEW')}
+                  >
+                    VIEW
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ flex: 1, fontSize: 12, padding: '6px 10px', justifyContent: 'center' }}
+                    onClick={() => handleOpenQuestionPaperModal('REVIEW')}
+                  >
+                    EDIT
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ fontSize: 12, padding: '6px 10px', color: 'var(--burgundy)' }}
+                    title="Replace with new question paper"
+                    onClick={() => handleOpenQuestionPaperModal('UPLOAD')}
+                  >
+                    REPLACE
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Question Text */}
           <div
@@ -2013,6 +2411,499 @@ export function EvaluationWorkspacePage() {
               >
                 {submitMutation.isPending ? 'Transmitting…' : 'SUBMIT EVALUATION'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* QUESTION PAPER INGESTION & REVIEW MODAL */}
+      {/* ============================================================ */}
+      {showQuestionPaperModal && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(14, 26, 43, 0.75)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: '24px',
+          }}
+        >
+          <div
+            style={{
+              background: '#ffffff',
+              border: '1px solid var(--border)',
+              maxWidth: 900,
+              width: '100%',
+              maxHeight: '90vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                padding: '16px 24px',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                background: 'var(--parchment-card)',
+              }}
+            >
+              <div>
+                <span
+                  style={{
+                    fontSize: 11,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.12em',
+                    color: 'var(--gold)',
+                    fontWeight: 700,
+                  }}
+                >
+                  EXAMINER WORKSPACE
+                </span>
+                <h3 style={{ margin: '2px 0 0 0', fontSize: 20, fontWeight: 700, color: 'var(--navy)' }}>
+                  {paperModalStep === 'UPLOAD' && 'Add Question Paper'}
+                  {paperModalStep === 'EXTRACTING' && 'Processing & Extracting Questions…'}
+                  {paperModalStep === 'REVIEW' && 'Question Paper Review (Human Verification)'}
+                  {paperModalStep === 'VIEW' && 'Question Paper Details'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                style={{ padding: '4px 10px', fontSize: 13 }}
+                onClick={() => setShowQuestionPaperModal(false)}
+                disabled={paperModalStep === 'EXTRACTING'}
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: '24px', overflowY: 'auto', flex: 1 }}>
+              {/* STEP: UPLOAD */}
+              {paperModalStep === 'UPLOAD' && (
+                <div>
+                  <div
+                    style={{
+                      background: 'rgba(212, 175, 55, 0.1)',
+                      border: '1px solid var(--gold)',
+                      padding: '12px 16px',
+                      marginBottom: 20,
+                      fontSize: 13,
+                      color: 'var(--navy)',
+                    }}
+                  >
+                    Upload the official question paper (PDF, JPEG, or PNG). EvalNexa Multimodal AI will extract all questions, maximum marks, and scoring criteria. You can review and edit every question before verification.
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: 'var(--navy)', marginBottom: 6 }}>
+                        Paper Set / Variant
+                      </label>
+                      <input
+                        type="text"
+                        value={paperSetInput}
+                        onChange={(e) => setPaperSetInput(e.target.value)}
+                        placeholder="e.g. Set A, Set B, Main"
+                        style={{
+                          width: '100%',
+                          padding: '10px 12px',
+                          border: '1px solid var(--border)',
+                          fontSize: 14,
+                        }}
+                      />
+                      <span style={{ fontSize: 11, color: '#64748b', marginTop: 4, display: 'block' }}>
+                        Supports multiple paper sets per examination
+                      </span>
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase', color: 'var(--navy)', marginBottom: 6 }}>
+                        Select Question Paper File
+                      </label>
+                      <input
+                        type="file"
+                        accept=".pdf,image/jpeg,image/png,image/webp"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            setSelectedFile(e.target.files[0]);
+                          }
+                        }}
+                        style={{
+                          width: '100%',
+                          padding: '8px',
+                          border: '1px solid var(--border)',
+                          fontSize: 13,
+                        }}
+                      />
+                      <span style={{ fontSize: 11, color: '#64748b', marginTop: 4, display: 'block' }}>
+                        Accepted: PDF, JPG, PNG (multipage supported)
+                      </span>
+                      {selectedFile && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            padding: '6px 10px',
+                            background: '#f1f5f9',
+                            border: '1px solid #cbd5e1',
+                            fontSize: 12,
+                            color: 'var(--navy)',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                          }}
+                        >
+                          <span>
+                            📄 <strong>{selectedFile.name}</strong> ({(selectedFile.size / 1024 / 1024).toFixed(2)} MB)
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedFile(null)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: '#64748b',
+                              cursor: 'pointer',
+                              fontSize: 13,
+                              fontWeight: 700,
+                            }}
+                            title="Remove file"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {uploadError && (
+                    <div
+                      style={{
+                        padding: '10px 14px',
+                        background: 'rgba(92,29,36,0.08)',
+                        border: '1px solid var(--burgundy)',
+                        color: 'var(--burgundy)',
+                        fontSize: 13,
+                        marginBottom: 16,
+                      }}
+                    >
+                      ⚠ {uploadError}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setShowQuestionPaperModal(false)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={!selectedFile || uploadPaperMutation.isPending}
+                      onClick={() => {
+                        if (selectedFile) {
+                          uploadPaperMutation.mutate({ file: selectedFile, paperSet: paperSetInput });
+                        }
+                      }}
+                      style={{ fontSize: 14, padding: '10px 20px' }}
+                    >
+                      Upload & Extract Questions →
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* STEP: EXTRACTING */}
+              {paperModalStep === 'EXTRACTING' && (
+                <div style={{ textAlign: 'center', padding: '40px 20px' }}>
+                  <div style={{ fontSize: 36, marginBottom: 16 }}>⚡</div>
+                  <h4 style={{ fontSize: 20, color: 'var(--navy)', marginBottom: 8 }}>
+                    Processing & Extracting Questions
+                  </h4>
+                  <p style={{ fontSize: 14, color: 'var(--charcoal)', maxWidth: 460, margin: '0 auto 20px auto' }}>
+                    Uploading safely to persistent Cloudinary storage and running Multimodal AI extraction to analyze questions, sections, marks, and scoring rubrics…
+                  </p>
+                  <div style={{ fontSize: 12, color: 'var(--gold)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+                    Please wait a moment…
+                  </div>
+                </div>
+              )}
+
+              {/* STEP: REVIEW & EDIT */}
+              {paperModalStep === 'REVIEW' && (
+                <div>
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      background: 'rgba(14,26,43,0.04)',
+                      padding: '12px 16px',
+                      border: '1px solid var(--border)',
+                      marginBottom: 16,
+                    }}
+                  >
+                    <div>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: '2px 8px',
+                          background: 'rgba(180, 83, 9, 0.15)',
+                          color: '#b45309',
+                          border: '1px solid #b45309',
+                          marginRight: 8,
+                        }}
+                      >
+                        EXTRACTED (PENDING VERIFICATION)
+                      </span>
+                      <span style={{ fontSize: 13, color: 'var(--charcoal)' }}>
+                        Review every question below. Edit text, adjust marks, or add missing questions.
+                      </span>
+                    </div>
+
+                    <div style={{ textAlign: 'right' }}>
+                      <span style={{ fontSize: 12, color: 'var(--charcoal)' }}>
+                        Total Questions: <strong>{editableQuestions.length}</strong> | Total Marks:{' '}
+                        <strong style={{ color: 'var(--navy)', fontSize: 16 }}>
+                          {editableQuestions.reduce((s, q) => s + (Number(q.maximumMarks) || 0), 0)}
+                        </strong>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 20 }}>
+                    {editableQuestions.map((q, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          background: '#ffffff',
+                          border: '1px solid var(--border)',
+                          padding: '14px',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            marginBottom: 8,
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span style={{ fontWeight: 700, color: 'var(--navy)', fontSize: 15 }}>
+                              Q{q.questionNumber}
+                            </span>
+                            <input
+                              type="text"
+                              value={q.section || ''}
+                              onChange={(e) => handleUpdateEditableQuestion(idx, 'section', e.target.value)}
+                              placeholder="Section / Part"
+                              style={{
+                                fontSize: 12,
+                                padding: '3px 8px',
+                                border: '1px solid var(--border)',
+                                width: 110,
+                              }}
+                            />
+                            <input
+                              type="text"
+                              value={q.subquestion || ''}
+                              onChange={(e) => handleUpdateEditableQuestion(idx, 'subquestion', e.target.value)}
+                              placeholder="Sub-part (e.g. 1a)"
+                              style={{
+                                fontSize: 12,
+                                padding: '3px 8px',
+                                border: '1px solid var(--border)',
+                                width: 110,
+                              }}
+                            />
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <label style={{ fontSize: 12, fontWeight: 700, color: 'var(--charcoal)' }}>
+                                Max Marks:
+                              </label>
+                              <input
+                                type="number"
+                                min="0.5"
+                                step="0.5"
+                                value={q.maximumMarks}
+                                onChange={(e) =>
+                                  handleUpdateEditableQuestion(idx, 'maximumMarks', parseFloat(e.target.value) || 0)
+                                }
+                                style={{
+                                  fontSize: 13,
+                                  fontWeight: 700,
+                                  padding: '4px 8px',
+                                  border: '1px solid var(--border)',
+                                  width: 65,
+                                  textAlign: 'center',
+                                }}
+                              />
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteQuestionRow(idx)}
+                              style={{
+                                border: 'none',
+                                background: 'transparent',
+                                color: 'var(--burgundy)',
+                                cursor: 'pointer',
+                                fontSize: 12,
+                              }}
+                              title="Delete Question"
+                            >
+                              ✕ Delete
+                            </button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <textarea
+                            rows={3}
+                            value={q.text}
+                            onChange={(e) => handleUpdateEditableQuestion(idx, 'text', e.target.value)}
+                            placeholder="Question statement"
+                            style={{
+                              width: '100%',
+                              padding: '8px',
+                              border: '1px solid var(--border)',
+                              fontSize: 14,
+                              lineHeight: 1.4,
+                              fontFamily: 'inherit',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={handleAddQuestionRow}
+                      style={{ fontSize: 13 }}
+                    >
+                      + Add Question
+                    </button>
+
+                    <div style={{ display: 'flex', gap: 10 }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => setShowQuestionPaperModal(false)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={handleSaveAndVerify}
+                        disabled={verifyPaperMutation.isPending}
+                        style={{ fontSize: 14, padding: '10px 20px', background: '#15803d', borderColor: '#15803d' }}
+                      >
+                        {verifyPaperMutation.isPending ? 'Verifying…' : '✓ SAVE & VERIFY QUESTION PAPER'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* STEP: VIEW */}
+              {paperModalStep === 'VIEW' && questionPaper && (
+                <div>
+                  <div
+                    style={{
+                      background: 'rgba(21, 128, 61, 0.08)',
+                      border: '1px solid #15803d',
+                      padding: '12px 16px',
+                      marginBottom: 20,
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 700, color: '#15803d', fontSize: 14 }}>
+                        ✓ Question Paper Verified & Active
+                      </div>
+                      <div style={{ fontSize: 13, color: 'var(--charcoal)', marginTop: 2 }}>
+                        File: {questionPaper.originalFileName} | Set: {questionPaper.paperSet || 'Default'} | Questions:{' '}
+                        {questionPaper.verifiedQuestions?.length || questionPaper.totalQuestions} | Max Marks:{' '}
+                        {questionPaper.maximumMarks}
+                      </div>
+                    </div>
+                    {questionPaper.secureUrl && (
+                      <a
+                        href={questionPaper.secureUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn btn-secondary"
+                        style={{ fontSize: 12, padding: '4px 10px' }}
+                      >
+                        Open Source File ↗
+                      </a>
+                    )}
+                  </div>
+
+                  <div style={{ marginBottom: 16 }}>
+                    <h5 style={{ fontSize: 14, fontWeight: 700, color: 'var(--navy)', marginBottom: 8 }}>
+                      Verified Questions
+                    </h5>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 300, overflowY: 'auto' }}>
+                      {(questionPaper.verifiedQuestions || []).map((q) => (
+                        <div
+                          key={q.questionNumber}
+                          style={{
+                            padding: '10px 14px',
+                            background: '#f8fafc',
+                            border: '1px solid var(--border)',
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                            <strong>Question {q.questionNumber} {q.subquestion ? `(${q.subquestion})` : ''}</strong>
+                            <span style={{ fontWeight: 700, color: 'var(--navy)' }}>{q.maximumMarks} Marks</span>
+                          </div>
+                          <div style={{ fontSize: 13, color: 'var(--charcoal)' }}>{q.text}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => handleOpenQuestionPaperModal('UPLOAD')}
+                    >
+                      Replace With New File
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => handleOpenQuestionPaperModal('REVIEW')}
+                      style={{ fontSize: 13, padding: '8px 16px' }}
+                    >
+                      Edit Questions
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

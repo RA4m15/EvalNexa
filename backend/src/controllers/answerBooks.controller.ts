@@ -471,6 +471,18 @@ export async function updateQuestionPageMapping(req: AuthRequest, res: Response)
       return;
     }
 
+    if (req.user?.role === 'EXAMINER') {
+      const assignedExaminerId = answerBook.assignedExaminerId;
+      if (!assignedExaminerId || !areEntityIdsEqual(assignedExaminerId, req.user._id)) {
+        res.status(403).json({
+          success: false,
+          message: 'Access denied: You are not assigned to this answer book',
+          code: 'ACCESS_DENIED',
+        });
+        return;
+      }
+    }
+
     if (!answerBook.questionPageMapping) {
       answerBook.questionPageMapping = [];
     }
@@ -501,6 +513,8 @@ export async function updateQuestionPageMapping(req: AuthRequest, res: Response)
     res.status(500).json({ success: false, message: error.message });
   }
 }
+
+export const updateQuestionMapping = updateQuestionPageMapping;
 
 /**
  * Replaces an existing page's media safely (Admin only)
