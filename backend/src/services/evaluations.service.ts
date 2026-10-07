@@ -10,7 +10,7 @@ import { logAuditAction } from './audit.service';
 import { emitToAll, emitToRole } from '../sockets';
 import { generateAuthorizedMediaUrl } from './media.service';
 import { EvaluationAssistantService } from './EvaluationAssistantService';
-import { autoMapAnswerBookPages } from './pageMapping.service';
+import { autoMapAnswerBookPages, CURRENT_MAPPING_ALGORITHM_VERSION } from './pageMapping.service';
 import { areEntityIdsEqual } from '../utils/identity';
 import fs from 'fs';
 import path from 'path';
@@ -399,12 +399,19 @@ export async function fetchEvaluationById(id: string, userRole: string, userId: 
   if (answerBookDoc && answerBookDoc._id) {
     const rawAnswerBook = await AnswerBook.findById(answerBookDoc._id);
     if (rawAnswerBook) {
-      const hasEstablishedMappings =
-        rawAnswerBook.questionPageMapping &&
-        rawAnswerBook.questionPageMapping.length > 0 &&
-        rawAnswerBook.questionPageMapping.some((m: any) => m.pages && m.pages.length > 0);
+      const currentMappings: any[] = rawAnswerBook.questionPageMapping || [];
+      const hasUnresolvedQuestions = currentMappings.some(
+        (m: any) => (!m.pages || m.pages.length === 0) && !m.examinerVerified && m.source !== 'EXAMINER_VERIFIED'
+      );
+      const hasOutdatedVersion = currentMappings.some(
+        (m: any) => m.mappingAlgorithmVersion !== CURRENT_MAPPING_ALGORITHM_VERSION && !m.examinerVerified && m.source !== 'EXAMINER_VERIFIED'
+      );
+      const needsMapping =
+        currentMappings.length === 0 ||
+        hasUnresolvedQuestions ||
+        hasOutdatedVersion;
 
-      if (!hasEstablishedMappings) {
+      if (needsMapping) {
         let qpId = rawAnswerBook.questionPaperId;
         let qp = null;
         if (qpId) {
@@ -429,6 +436,7 @@ export async function fetchEvaluationById(id: string, userRole: string, userId: 
                 answerBook: rawAnswerBook,
                 questionPaper: qp,
                 answerPages: pages,
+                forceRemap: hasUnresolvedQuestions || hasOutdatedVersion,
               });
               rawAnswerBook.questionPageMapping = updatedMappings;
               answerBookDoc.questionPageMapping = updatedMappings;

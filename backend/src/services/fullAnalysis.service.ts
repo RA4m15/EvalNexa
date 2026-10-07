@@ -304,11 +304,12 @@ export async function executeFullAnalysisBackground(params: {
       pageNumber: 1,
     });
 
-    // Step 3: Identify Question → Page Mappings
+    // Step 3: Identify Question → Page Mappings (Invalidates stale mappings, preserves examiner-verified)
     await identifyQuestionPageMappings({
       answerBook,
       questionPaper,
       answerPages,
+      forceRemap: true,
     });
 
     evaluation.fullAnalysisJob.analyzedPages = answerPages.length;
