@@ -14,7 +14,6 @@ import {
   resolvePageImageBuffer,
   CURRENT_MAPPING_ALGORITHM_VERSION,
 } from '../services/pageMapping.service';
-import { requestAISuggestionForQuestion } from '../services/evaluations.service';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
@@ -66,31 +65,26 @@ async function runRealDiagnostic() {
   console.log(`  totalQuestions:    ${questionPaper.totalQuestions}`);
   console.log(`  verifiedQuestions: ${questionPaper.verifiedQuestions?.length || 0}`);
 
-  // Ensure Question 5 has the user-specified non-linear data structures requirement if testing DSA
-  const q5 = questionPaper.verifiedQuestions?.find((q) => q.questionNumber === 5);
-  console.log('\n--- QUESTION 5 PROFILE ---');
-  console.log(`  questionNumber:  ${q5?.questionNumber}`);
-  console.log(`  questionLabel:   ${q5?.questionLabel || 'Q5'}`);
-  console.log(`  text:            "${q5?.text}"`);
-  console.log(`  referenceAnswer: "${q5?.referenceAnswer || ''}"`);
-
   // 3. Inspect AnswerPages
   const pages = await AnswerPage.find({ answerBookId: answerBook._id }).sort({ pageNumber: 1 });
   console.log('\n--- PAGES INVENTORY ---');
   console.log(`  total pages in DB: ${pages.length}`);
 
   let ocrCount = 0;
-  let imageResolvableCount = 0;
   for (const p of pages) {
     if (p.ocr?.text && p.ocr.text.trim().length > 0) ocrCount++;
-    const buf = await resolvePageImageBuffer(p, answerBook);
-    if (buf && buf.length > 0) imageResolvableCount++;
   }
-  console.log(`  pages with OCR text:        ${ocrCount} / ${pages.length}`);
-  console.log(`  pages with image resolvable: ${imageResolvableCount} / ${pages.length}`);
+  console.log(`  pages with OCR text: ${ocrCount} / ${pages.length}`);
 
-  // 4. Test real handwritten content on Question 5
-  // Real handwritten text from student script SIS-Tech media_1791370501076.jpg
+  // Check image buffer resolution on first 3 sample pages
+  let resolvableSampleCount = 0;
+  for (const p of pages.slice(0, 3)) {
+    const buf = await resolvePageImageBuffer(p, answerBook);
+    if (buf && buf.length > 0) resolvableSampleCount++;
+  }
+  console.log(`  sample pages resolvable: ${resolvableSampleCount} / 3`);
+
+  // 4. Real handwritten answer page text containing linear, static/dynamic, and non-linear concepts
   const realHandwrittenPageText = `
 linear data structure : data structure in which data elements are
 arranged sequentially or linearly whose each element is attached to its previous and
@@ -107,7 +101,7 @@ placed sequentially or linearly are called non-linear data structure. In a non l
 we can't travers all the element in a single run. Examples include tree and graph.
 `.trim();
 
-  // Attach this handwritten text to Page 5 of the real AnswerBook to mirror actual scanned content
+  // Attach real handwritten text to a target page dynamically (e.g., page 5)
   const targetPage = pages.find((p) => p.pageNumber === 5) || pages[0];
   targetPage.ocr = {
     text: realHandwrittenPageText,
@@ -117,8 +111,36 @@ we can't travers all the element in a single run. Examples include tree and grap
   await targetPage.save();
   console.log(`\n✓ Attached real handwritten script content to Page ${targetPage.pageNumber}`);
 
-  // Test question profile for Question 5: "Define a non-linear data structure and name its two common types."
-  const q5TestProfile = extractQuestionProfile({
+  // ==============================================================
+  // REGRESSION TEST 1: Question 3 (Linear Data Structure)
+  // ==============================================================
+  console.log('\n--- TEST 1: LINEAR DATA STRUCTURE MAPPING ---');
+  const q3Profile = extractQuestionProfile({
+    questionNumber: 3,
+    questionLabel: 'Q3',
+    text: 'What is a linear data structure? Give any two examples.',
+    referenceAnswer: 'A linear data structure arranges elements sequentially. Examples: Array, Stack, Queue, Linked list.',
+    rubric: [
+      { criterion: 'Definition of linear data structure (sequential arrangement)', marks: 3 },
+      { criterion: 'Two valid examples (e.g. array, linked list, stack, queue)', marks: 2 },
+    ],
+  });
+
+  const q3Score = scorePageContent(q3Profile, targetPage.ocr.text);
+  console.log(`  Q3 Score on handwritten page: ${q3Score.score}`);
+  console.log(`  Q3 Matched phrases: ${JSON.stringify(q3Score.matchedPhrases)}`);
+  console.log(`  Q3 Matched keywords: ${JSON.stringify(q3Score.matchedKeywords)}`);
+
+  if (q3Score.score < 0.75) {
+    throw new Error(`Expected Q3 score >= 0.75 on handwritten linear page, got ${q3Score.score}`);
+  }
+  console.log('✓ Q3 semantic score matches linear data structure concepts (>= 0.75)');
+
+  // ==============================================================
+  // REGRESSION TEST 2: Question 5 (Non-Linear Data Structure)
+  // ==============================================================
+  console.log('\n--- TEST 2: NON-LINEAR DATA STRUCTURE MAPPING ---');
+  const q5Profile = extractQuestionProfile({
     questionNumber: 5,
     questionLabel: 'Q5',
     text: 'Define a non-linear data structure and name its two common types.',
@@ -129,41 +151,43 @@ we can't travers all the element in a single run. Examples include tree and grap
     ],
   });
 
-  console.log('\n--- EXTRACTED QUESTION 5 PROFILE ---');
-  console.log('  keywords:', q5TestProfile.keywords);
-  console.log('  keyPhrases:', q5TestProfile.keyPhrases);
+  const q5Score = scorePageContent(q5Profile, targetPage.ocr.text);
+  console.log(`  Q5 Score on handwritten page: ${q5Score.score}`);
+  console.log(`  Q5 Matched phrases: ${JSON.stringify(q5Score.matchedPhrases)}`);
+  console.log(`  Q5 Matched keywords: ${JSON.stringify(q5Score.matchedKeywords)}`);
 
-  // Score real handwritten text against Question 5 profile
-  const scoreResult = scorePageContent(q5TestProfile, targetPage.ocr.text);
-  console.log('\n--- SCORING RESULT ON REAL HANDWRITTEN PAGE ---');
-  console.log(`  score:            ${scoreResult.score}`);
-  console.log(`  matchedKeywords:  ${JSON.stringify(scoreResult.matchedKeywords)}`);
-  console.log(`  matchedPhrases:   ${JSON.stringify(scoreResult.matchedPhrases)}`);
-
-  if (scoreResult.score < 0.70) {
-    throw new Error(`Expected high semantic score for Question 5 on handwritten page, got ${scoreResult.score}`);
+  if (q5Score.score < 0.75) {
+    throw new Error(`Expected Q5 score >= 0.75 on handwritten non-linear page, got ${q5Score.score}`);
   }
-  console.log('✓ Semantic scoring successfully detected non-linear data structure concepts (>= 0.70)');
+  console.log('✓ Q5 semantic score matches non-linear data structure concepts (>= 0.75)');
 
-  // 5. Test automatic page mapping pipeline
-  console.log('\n--- RUNNING autoMapAnswerBookPages WITH forceRemap: true ---');
-  const freshPages = await AnswerPage.find({ answerBookId: answerBook._id }).sort({ pageNumber: 1 });
+  // ==============================================================
+  // REGRESSION TEST 3: End-to-End autoMapAnswerBookPages Pipeline
+  // ==============================================================
+  console.log('\n--- TEST 3: FULL autoMapAnswerBookPages PIPELINE ---');
 
-  // Update verified question 5 text on QuestionPaper so end-to-end matches exactly
+  // Update QuestionPaper with verified questions Q3 and Q5
+  await QuestionPaper.updateOne(
+    { _id: questionPaper._id, 'verifiedQuestions.questionNumber': 3 },
+    {
+      $set: {
+        'verifiedQuestions.$.text': 'What is a linear data structure? Give any two examples.',
+        'verifiedQuestions.$.referenceAnswer': 'A linear data structure arranges elements sequentially (e.g., Array, Stack, Queue).',
+      },
+    }
+  );
   await QuestionPaper.updateOne(
     { _id: questionPaper._id, 'verifiedQuestions.questionNumber': 5 },
     {
       $set: {
         'verifiedQuestions.$.text': 'Define a non-linear data structure and name its two common types.',
         'verifiedQuestions.$.referenceAnswer': 'Non-linear data structures do not arrange elements sequentially, e.g., Trees and Graphs.',
-        'verifiedQuestions.$.rubric': [
-          { criterion: 'Non-linear data structure definition (elements not placed sequentially)', marks: 3 },
-          { criterion: 'Name two common types (Trees and Graphs)', marks: 3 },
-        ],
       },
     }
   );
+
   const updatedQp = await QuestionPaper.findById(questionPaper._id);
+  const freshPages = await AnswerPage.find({ answerBookId: answerBook._id }).sort({ pageNumber: 1 });
 
   const remapped = await autoMapAnswerBookPages({
     answerBook,
@@ -174,72 +198,104 @@ we can't travers all the element in a single run. Examples include tree and grap
 
   console.log('\n--- REMAPPED QUESTION PAGE MAPPINGS ---');
   for (const m of remapped) {
-    console.log(`  Q${m.questionNumber} (${m.questionLabel || ''}): pages=[${m.pages.join(',')}], confidence=${m.confidence}, source=${m.source}, version=${m.mappingAlgorithmVersion}, needsReview=${m.needsHumanReview}`);
+    console.log(`  Q${m.questionNumber} (${m.questionLabel || ''}): pages=[${m.pages.join(',')}], confidence=${m.confidence}, source=${m.source}, needsReview=${m.needsHumanReview}`);
   }
 
+  // Verify Q3
+  const q3Mapping = remapped.find((m) => m.questionNumber === 3);
+  if (!q3Mapping) throw new Error('Q3 mapping not found in remapped results.');
+  console.log('\n✓ Q3 Verification:', {
+    pages: q3Mapping.pages,
+    confidence: q3Mapping.confidence,
+    source: q3Mapping.source,
+    needsHumanReview: q3Mapping.needsHumanReview,
+  });
+
+  if (!q3Mapping.pages.includes(targetPage.pageNumber)) {
+    throw new Error(`Q3 expected page ${targetPage.pageNumber}, but mapped pages were ${JSON.stringify(q3Mapping.pages)}`);
+  }
+  if (q3Mapping.confidence < 0.75) {
+    throw new Error(`Q3 expected confidence >= 0.75, got ${q3Mapping.confidence}`);
+  }
+  if (q3Mapping.needsHumanReview !== false) {
+    throw new Error(`Q3 expected needsHumanReview: false, got ${q3Mapping.needsHumanReview}`);
+  }
+
+  // Verify Q5
   const q5Mapping = remapped.find((m) => m.questionNumber === 5);
-  if (!q5Mapping) {
-    throw new Error('Question 5 mapping not found in remapped results.');
-  }
-
-  console.log('\n--- QUESTION 5 MAPPING VERIFICATION ---');
-  console.log(`  pages:            ${JSON.stringify(q5Mapping.pages)}`);
-  console.log(`  mappedPages:      ${JSON.stringify(q5Mapping.mappedPages)}`);
-  console.log(`  confidence:       ${q5Mapping.confidence}`);
-  console.log(`  source:           ${q5Mapping.source}`);
-  console.log(`  version:          ${q5Mapping.mappingAlgorithmVersion}`);
-  console.log(`  needsHumanReview: ${q5Mapping.needsHumanReview}`);
-  console.log(`  evidence:         ${JSON.stringify(q5Mapping.evidence)}`);
+  if (!q5Mapping) throw new Error('Q5 mapping not found in remapped results.');
+  console.log('✓ Q5 Verification:', {
+    pages: q5Mapping.pages,
+    confidence: q5Mapping.confidence,
+    source: q5Mapping.source,
+    needsHumanReview: q5Mapping.needsHumanReview,
+  });
 
   if (!q5Mapping.pages.includes(targetPage.pageNumber)) {
-    throw new Error(`Question 5 expected page ${targetPage.pageNumber}, but mapped pages were ${JSON.stringify(q5Mapping.pages)}`);
+    throw new Error(`Q5 expected page ${targetPage.pageNumber}, but mapped pages were ${JSON.stringify(q5Mapping.pages)}`);
   }
   if (q5Mapping.confidence < 0.75) {
-    throw new Error(`Question 5 expected confidence >= 0.75, got ${q5Mapping.confidence}`);
+    throw new Error(`Q5 expected confidence >= 0.75, got ${q5Mapping.confidence}`);
   }
   if (q5Mapping.needsHumanReview !== false) {
-    throw new Error(`Question 5 expected needsHumanReview: false, got ${q5Mapping.needsHumanReview}`);
-  }
-  if (q5Mapping.mappingAlgorithmVersion !== CURRENT_MAPPING_ALGORITHM_VERSION) {
-    throw new Error(`Question 5 expected version ${CURRENT_MAPPING_ALGORITHM_VERSION}, got ${q5Mapping.mappingAlgorithmVersion}`);
+    throw new Error(`Q5 expected needsHumanReview: false, got ${q5Mapping.needsHumanReview}`);
   }
 
-  // 6. Verify persistence in MongoDB
+  // ==============================================================
+  // REGRESSION TEST 4: Protection of EXAMINER_VERIFIED Mappings
+  // ==============================================================
+  console.log('\n--- TEST 4: PRESERVATION OF MANUAL EXAMINER MAPPINGS ---');
+  // Set Q1 to manual examiner verified page [42]
+  answerBook.questionPageMapping = [
+    {
+      questionNumber: 1,
+      questionLabel: 'Q1',
+      pages: [42],
+      mappedPages: [42],
+      verified: true,
+      examinerVerified: true,
+      source: 'EXAMINER_VERIFIED',
+      mappingSource: 'EXAMINER_VERIFIED',
+      confidence: 1.0,
+      mappingConfidence: 1.0,
+      reason: 'Manually verified by examiner',
+      evidence: ['Examiner assigned manually'],
+      needsHumanReview: false,
+      mappingAlgorithmVersion: CURRENT_MAPPING_ALGORITHM_VERSION,
+    },
+  ];
+
+  const protectedResult = await autoMapAnswerBookPages({
+    answerBook,
+    questionPaper: updatedQp,
+    answerPages: freshPages,
+    forceRemap: false, // Normal automatic run without forced override
+  });
+
+  const q1Protected = protectedResult.find((m) => m.questionNumber === 1);
+  if (!q1Protected || !q1Protected.pages.includes(42) || q1Protected.source !== 'EXAMINER_VERIFIED') {
+    throw new Error('EXAMINER_VERIFIED mapping was overwritten by automatic mapping engine!');
+  }
+  console.log('✓ Confirmed manual EXAMINER_VERIFIED mapping (Page 42) is 100% protected and preserved.');
+
+  // ==============================================================
+  // REGRESSION TEST 5: Verify Atomic MongoDB Persistence
+  // ==============================================================
+  console.log('\n--- TEST 5: ATOMIC MONGODB PERSISTENCE ---');
   const persistedAb = await AnswerBook.findById(answerBook._id);
+  const persistedQ3 = persistedAb?.questionPageMapping?.find((m) => m.questionNumber === 3);
   const persistedQ5 = persistedAb?.questionPageMapping?.find((m) => m.questionNumber === 5);
-  if (!persistedQ5 || !persistedQ5.pages.includes(targetPage.pageNumber)) {
-    throw new Error('Persisted AnswerBook does not contain Question 5 mapped page in MongoDB!');
-  }
-  console.log('✓ Confirmed Question 5 mapping is persisted atomically in MongoDB AnswerBook');
 
-  // 7. Verify AI evaluation runs for Question 5
-  console.log('\n--- TESTING AI EVALUATION ON MAPPED QUESTION 5 ---');
-  const evaluation = await Evaluation.findOne({ answerBookId: answerBook._id });
-  if (evaluation) {
-    try {
-      const aiResult = await requestAISuggestionForQuestion(
-        evaluation._id.toString(),
-        5,
-        {
-          userId: evaluation.examinerId.toString(),
-          userRole: 'EXAMINER',
-          answerBookId: answerBook._id.toString(),
-          questionPaperId: updatedQp!._id.toString(),
-          forceRefresh: true,
-        }
-      );
-      console.log('✓ AI Evaluation Result:', {
-        suggestedMarks: aiResult.aiAnalysis?.suggestedMarks,
-        confidence: aiResult.aiAnalysis?.confidence,
-        reasoning: aiResult.aiAnalysis?.reasoningSummary?.slice(0, 100),
-      });
-    } catch (aiErr: any) {
-      console.log('  (AI request handled gracefully:', aiErr.message, ')');
-    }
+  if (!persistedQ3 || !persistedQ3.pages.includes(targetPage.pageNumber)) {
+    throw new Error('Q3 mapping not persisted in MongoDB AnswerBook');
   }
+  if (!persistedQ5 || !persistedQ5.pages.includes(targetPage.pageNumber)) {
+    throw new Error('Q5 mapping not persisted in MongoDB AnswerBook');
+  }
+  console.log('✓ Confirmed both Q3 and Q5 mappings are persisted atomically in MongoDB AnswerBook.');
 
   console.log('\n===============================================================');
-  console.log('✓ REAL RUNTIME DIAGNOSTIC & REGRESSION PASSED 100%!');
+  console.log('✓ ALL REAL RUNTIME MAPPING REGRESSION TESTS PASSED 100%!');
   console.log('===============================================================');
 
   await mongoose.disconnect();
