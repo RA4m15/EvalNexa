@@ -687,8 +687,15 @@ export function EvaluationWorkspacePage() {
         .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
         .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
 
-      if (exam && total > exam.maximumMarks) {
-        throw new Error(`Total marks (${total}) cannot exceed examination maximum (${exam.maximumMarks}).`);
+      const maxAllowed =
+        (typeof evaluation?.totalPossibleMarks === 'number' && evaluation.totalPossibleMarks > 0)
+          ? evaluation.totalPossibleMarks
+          : activeQuestions.length > 0
+          ? activeQuestions.reduce((sum, q) => sum + (Number(q.maximumMarks) || 0), 0)
+          : exam?.maximumMarks || 0;
+
+      if (maxAllowed > 0 && total > maxAllowed) {
+        throw new Error(`Total marks (${total}) cannot exceed examination maximum (${maxAllowed}).`);
       }
 
       await apiClient.post(`/evaluations/${evaluation._id}/submit`, {
@@ -1017,8 +1024,11 @@ export function EvaluationWorkspacePage() {
     .filter((m) => m.status === 'MARKED' || m.status === 'FLAGGED')
     .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
   const totalMaxMarks =
-    exam?.maximumMarks ||
-    activeQuestions.reduce((sum, q) => sum + (Number(q.maximumMarks) || 0), 0);
+    (typeof evaluation?.totalPossibleMarks === 'number' && evaluation.totalPossibleMarks > 0)
+      ? evaluation.totalPossibleMarks
+      : activeQuestions.length > 0
+      ? activeQuestions.reduce((sum, q) => sum + (Number(q.maximumMarks) || 0), 0)
+      : exam?.maximumMarks || 0;
 
   return (
     <div style={{ margin: '-32px -48px -40px -48px', height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column' }}>

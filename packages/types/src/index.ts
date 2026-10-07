@@ -263,6 +263,7 @@ export interface Evaluation {
   examinerId: string | User;
   status: EvaluationStatus;
   totalMarks?: number;
+  totalPossibleMarks?: number;
   remarks?: string;
   questionMarks?: QuestionMarkItem[];
   fullAnalysisJob?: FullAnalysisJob;

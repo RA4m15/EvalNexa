@@ -23,6 +23,19 @@ export interface IAuthoritativeQuestion {
 }
 
 /**
+ * Calculates total possible marks from authoritative questions map.
+ */
+export function calculateTotalPossibleMarks(
+  authoritativeQuestions: Map<number, IAuthoritativeQuestion>
+): number {
+  let total = 0;
+  for (const q of authoritativeQuestions.values()) {
+    total += Number(q.maximumMarks || 0);
+  }
+  return total;
+}
+
+/**
  * Fetches official exam questions from MongoDB.
  * Falls back to Exam metadata if individual Question records are not populated.
  */
@@ -33,11 +46,20 @@ export async function fetchAuthoritativeQuestions(
   // 1. If AnswerBook has an active verified QuestionPaper, it is the primary authority!
   if (answerBookId) {
     const answerBook = await AnswerBook.findById(answerBookId);
-    if (answerBook && answerBook.questionPaperId) {
-      const qp = await QuestionPaper.findById(answerBook.questionPaperId);
+    if (answerBook) {
+      let qp = null;
+      if (answerBook.questionPaperId) {
+        qp = await QuestionPaper.findById(answerBook.questionPaperId);
+      }
+      if (!qp) {
+        qp = await QuestionPaper.findOne({
+          examId: answerBook.examId,
+          extractionStatus: 'VERIFIED',
+        }).sort({ updatedAt: -1 });
+      }
       if (
         qp &&
-        qp.extractionStatus === 'VERIFIED' &&
+        (qp.extractionStatus === 'VERIFIED' || (qp as any).status === 'VERIFIED') &&
         qp.verifiedQuestions &&
         qp.verifiedQuestions.length > 0
       ) {
@@ -447,6 +469,19 @@ export async function fetchEvaluationById(id: string, userRole: string, userId: 
         }
       }
     }
+
+    // Dynamically attach authoritative totalPossibleMarks from active QuestionPaper / exam questions
+    const examId =
+      typeof answerBookDoc.examId === 'object' && answerBookDoc.examId !== null && '_id' in answerBookDoc.examId
+        ? answerBookDoc.examId._id
+        : answerBookDoc.examId;
+    if (examId) {
+      const authoritativeQuestions = await fetchAuthoritativeQuestions(examId, answerBookDoc._id);
+      const computedPossible = calculateTotalPossibleMarks(authoritativeQuestions);
+      if (computedPossible > 0) {
+        evaluation.totalPossibleMarks = computedPossible;
+      }
+    }
   }
 
   return evaluation;
@@ -504,8 +539,18 @@ export async function beginEvaluation(id: string, examinerId: string) {
   } else {
     evaluation.status = 'IN_PROGRESS';
     evaluation.startedAt = evaluation.startedAt || new Date();
-    await evaluation.save();
   }
+
+  const examId =
+    typeof answerBook.examId === 'object' && answerBook.examId !== null && '_id' in (answerBook.examId as any)
+      ? (answerBook.examId as any)._id
+      : answerBook.examId;
+  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId, answerBook._id);
+  const computedPossible = calculateTotalPossibleMarks(authoritativeQuestions);
+  if (computedPossible > 0) {
+    evaluation.totalPossibleMarks = computedPossible;
+  }
+  await evaluation.save();
 
   answerBook.status = 'IN_PROGRESS';
   await answerBook.save();
@@ -571,6 +616,10 @@ export async function updateEvaluationMarks(
 
   // 1. Fetch authoritative questions for this exam from MongoDB
   const authoritativeQuestions = await fetchAuthoritativeQuestions(examId, answerBook._id);
+  const totalPossibleMarks = calculateTotalPossibleMarks(authoritativeQuestions);
+  if (totalPossibleMarks > 0) {
+    evaluation.totalPossibleMarks = totalPossibleMarks;
+  }
 
   // 2. Validate and calculate authoritative total
   if (data.questionMarks && Array.isArray(data.questionMarks)) {
@@ -712,20 +761,23 @@ export async function submitEvaluationFinal(
     throw error;
   }
 
-  // 4. Validate against examination maximumMarks if available
+  // 4. Validate against authoritative totalPossibleMarks (or examination maximumMarks as fallback)
+  const totalPossibleMarks = calculateTotalPossibleMarks(authoritativeQuestions);
   const exam = await Exam.findById(examId);
-  if (exam && exam.maximumMarks && computedTotal > exam.maximumMarks) {
+  const maxAllowed = totalPossibleMarks > 0 ? totalPossibleMarks : (exam?.maximumMarks || 0);
+  if (maxAllowed > 0 && computedTotal > maxAllowed) {
     const error: any = new Error(
-      `Total calculated marks (${computedTotal}) exceed examination maximum allowed (${exam.maximumMarks}).`
+      `Total calculated marks (${computedTotal}) exceed maximum allowed (${maxAllowed}).`
     );
     error.status = 400;
     error.code = 'TOTAL_EXCEEDS_EXAM_MAXIMUM';
     throw error;
   }
 
-  // 5. Store ONLY the backend-calculated total
+  // 5. Store ONLY the backend-calculated total and authoritative totalPossibleMarks
   evaluation.questionMarks = validatedList;
   evaluation.totalMarks = computedTotal;
+  evaluation.totalPossibleMarks = maxAllowed;
 
   // Validate state transition
   validateStateTransition(answerBook.status, 'SUBMITTED');
@@ -752,7 +804,7 @@ export async function submitEvaluationFinal(
     entityId: evaluation._id.toString(),
     metadata: {
       totalMarks: evaluation.totalMarks,
-      maximumMarks: exam?.maximumMarks,
+      maximumMarks: evaluation.totalPossibleMarks || exam?.maximumMarks,
       answerBookId: evaluation.answerBookId.toString(),
       totalExpected: summary.totalExpected,
       evaluatedQuestions: summary.evaluatedQuestions,
