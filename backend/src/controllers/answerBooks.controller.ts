@@ -6,6 +6,7 @@ import {
   updateScriptProcessingStatus,
 } from '../services/ingestion.service';
 import { AnswerBook, IQuestionPageMapping } from '../models/AnswerBook';
+import { Evaluation } from '../models/Evaluation';
 import { AnswerPage } from '../models/AnswerPage';
 import {
   generateAuthorizedMediaUrl,
@@ -494,15 +495,45 @@ export async function updateQuestionPageMapping(req: AuthRequest, res: Response)
     if (existingIdx >= 0) {
       answerBook.questionPageMapping[existingIdx].pages = pages.map(Number);
       answerBook.questionPageMapping[existingIdx].verified = true;
+      answerBook.questionPageMapping[existingIdx].source = 'EXAMINER_VERIFIED';
+      answerBook.questionPageMapping[existingIdx].mappingSource = 'EXAMINER_VERIFIED';
+      answerBook.questionPageMapping[existingIdx].examinerVerified = true;
+      answerBook.questionPageMapping[existingIdx].needsHumanReview = false;
+      answerBook.questionPageMapping[existingIdx].reason = 'Manually verified by examiner';
+      answerBook.questionPageMapping[existingIdx].aiSuggestedPages = undefined;
     } else {
       answerBook.questionPageMapping.push({
         questionNumber: Number(questionNumber),
         pages: pages.map(Number),
         verified: true,
+        source: 'EXAMINER_VERIFIED',
+        mappingSource: 'EXAMINER_VERIFIED',
+        examinerVerified: true,
+        needsHumanReview: false,
+        reason: 'Manually verified by examiner',
       });
     }
 
     await answerBook.save();
+
+    // Invalidate affected stale AI analysis for this question
+    await Evaluation.updateMany(
+      { answerBookId: answerBook._id, 'questionMarks.questionNumber': Number(questionNumber) },
+      {
+        $set: {
+          'questionMarks.$.aiAnalysis': null,
+          'questionMarks.$.aiStatus': 'IDLE',
+          'questionMarks.$.aiError': null,
+        },
+      }
+    );
+
+    // Emit real-time mapping update to all connected examiner desks
+    emitToAll('answerbook.mapping.updated', {
+      answerBookId: answerBook._id.toString(),
+      mappings: answerBook.questionPageMapping,
+      updatedQuestionNumber: Number(questionNumber),
+    });
 
     res.json({
       success: true,
@@ -553,11 +584,19 @@ export async function acceptAiPageMapping(req: AuthRequest, res: Response): Prom
       m.reason = m.aiReason || 'Examiner accepted AI page mapping';
       m.verified = true;
       m.source = 'EXAMINER_VERIFIED';
+      m.mappingSource = 'EXAMINER_VERIFIED';
+      m.examinerVerified = true;
       m.aiSuggestedPages = undefined;
       m.aiConfidence = undefined;
       m.aiReason = undefined;
       m.needsHumanReview = false;
       await answerBook.save();
+
+      emitToAll('answerbook.mapping.updated', {
+        answerBookId: answerBook._id.toString(),
+        mappings: answerBook.questionPageMapping,
+        updatedQuestionNumber: qNum,
+      });
     }
 
     res.json({

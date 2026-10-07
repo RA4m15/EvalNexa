@@ -10,9 +10,11 @@ import { logAuditAction } from './audit.service';
 import { emitToAll, emitToRole } from '../sockets';
 import { generateAuthorizedMediaUrl } from './media.service';
 import { EvaluationAssistantService } from './EvaluationAssistantService';
+import { autoMapAnswerBookPages } from './pageMapping.service';
 import { areEntityIdsEqual } from '../utils/identity';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 export interface IAuthoritativeQuestion {
   questionNumber: number;
@@ -25,8 +27,34 @@ export interface IAuthoritativeQuestion {
  * Falls back to Exam metadata if individual Question records are not populated.
  */
 export async function fetchAuthoritativeQuestions(
-  examId: string | mongoose.Types.ObjectId
+  examId: string | mongoose.Types.ObjectId,
+  answerBookId?: string | mongoose.Types.ObjectId
 ): Promise<Map<number, IAuthoritativeQuestion>> {
+  // 1. If AnswerBook has an active verified QuestionPaper, it is the primary authority!
+  if (answerBookId) {
+    const answerBook = await AnswerBook.findById(answerBookId);
+    if (answerBook && answerBook.questionPaperId) {
+      const qp = await QuestionPaper.findById(answerBook.questionPaperId);
+      if (
+        qp &&
+        qp.extractionStatus === 'VERIFIED' &&
+        qp.verifiedQuestions &&
+        qp.verifiedQuestions.length > 0
+      ) {
+        const questionMap = new Map<number, IAuthoritativeQuestion>();
+        for (const q of qp.verifiedQuestions) {
+          questionMap.set(q.questionNumber, {
+            questionNumber: q.questionNumber,
+            maximumMarks: q.maximumMarks,
+            text: q.text,
+          });
+        }
+        return questionMap;
+      }
+    }
+  }
+
+  // 2. Official questions in DB
   const officialQuestions = await Question.find({ examId }).sort({ questionNumber: 1 });
   const questionMap = new Map<number, IAuthoritativeQuestion>();
 
@@ -41,7 +69,7 @@ export async function fetchAuthoritativeQuestions(
     return questionMap;
   }
 
-  // Fallback to exam metadata if individual Question records are not populated
+  // 3. Fallback to exam metadata if individual Question records are not populated
   const exam = await Exam.findById(examId);
   if (exam && exam.totalQuestions > 0) {
     const defaultMaxMarks = exam.maximumMarks
@@ -261,13 +289,44 @@ export function validateQuestionMarksList(
       throw error;
     }
 
-    // Also ensure no question remains in NOT_STARTED state upon submission
+    // Ensure every question has been reviewed and has an explicit final decision
+    const unreviewedKeys: number[] = [];
+    const reviewedWithoutDecision: number[] = [];
     const unstartedKeys: number[] = [];
+
     for (const qm of questionMarks) {
-      if (qm.status === 'NOT_STARTED') {
-        unstartedKeys.push(qm.questionNumber);
+      if (!qm.examinerReviewed) {
+        unreviewedKeys.push(qm.questionNumber);
+      }
+      if (qm.status === 'NOT_STARTED' || qm.status === undefined) {
+        if (qm.examinerReviewed) {
+          reviewedWithoutDecision.push(qm.questionNumber);
+        } else {
+          unstartedKeys.push(qm.questionNumber);
+        }
       }
     }
+
+    if (unreviewedKeys.length > 0) {
+      const error: any = new Error(
+        `Review all questions before submitting. The following questions have not been reviewed by the examiner: ${unreviewedKeys.map(k => `Q${k}`).join(', ')}`
+      );
+      error.status = 400;
+      error.code = 'UNREVIEWED_QUESTIONS';
+      error.details = { summary, unreviewedQuestions: unreviewedKeys };
+      throw error;
+    }
+
+    if (reviewedWithoutDecision.length > 0) {
+      const error: any = new Error(
+        `${reviewedWithoutDecision.map(k => `Q${k}`).join(', ')} has been reviewed but does not have a final examiner decision. Every question must have final marks entered or be marked as NOT_ATTEMPTED before submission.`
+      );
+      error.status = 400;
+      error.code = 'QUESTION_DECISION_REQUIRED';
+      error.details = { summary, unresolvedQuestions: reviewedWithoutDecision };
+      throw error;
+    }
+
     if (unstartedKeys.length > 0) {
       const error: any = new Error(
         `Question ${unstartedKeys.map(k => `Q${k}`).join(', ')} has not been evaluated. Every question must have an explicit evaluated status (MARKED, FLAGGED, or NOT_ATTEMPTED) before submission.`
@@ -333,6 +392,53 @@ export async function fetchEvaluationById(id: string, userRole: string, userId: 
     error.status = 403;
     error.code = 'ACCESS_DENIED';
     throw error;
+  }
+
+  // Automatic content-driven page mapping runs first if answer book mappings are not yet established
+  const answerBookDoc = evaluation.answerBookId as any;
+  if (answerBookDoc && answerBookDoc._id) {
+    const rawAnswerBook = await AnswerBook.findById(answerBookDoc._id);
+    if (rawAnswerBook) {
+      const hasEstablishedMappings =
+        rawAnswerBook.questionPageMapping &&
+        rawAnswerBook.questionPageMapping.length > 0 &&
+        rawAnswerBook.questionPageMapping.some((m: any) => m.pages && m.pages.length > 0);
+
+      if (!hasEstablishedMappings) {
+        let qpId = rawAnswerBook.questionPaperId;
+        let qp = null;
+        if (qpId) {
+          qp = await QuestionPaper.findById(qpId);
+        }
+        if (!qp) {
+          qp = await QuestionPaper.findOne({
+            examId: rawAnswerBook.examId,
+            status: 'VERIFIED',
+          }).sort({ updatedAt: -1 });
+          if (qp) {
+            rawAnswerBook.questionPaperId = qp._id;
+            await rawAnswerBook.save();
+          }
+        }
+
+        if (qp) {
+          const pages = await AnswerPage.find({ answerBookId: rawAnswerBook._id }).sort({ pageNumber: 1 });
+          if (pages.length > 0) {
+            try {
+              const updatedMappings = await autoMapAnswerBookPages({
+                answerBook: rawAnswerBook,
+                questionPaper: qp,
+                answerPages: pages,
+              });
+              rawAnswerBook.questionPageMapping = updatedMappings;
+              answerBookDoc.questionPageMapping = updatedMappings;
+            } catch (mapErr) {
+              console.warn('[fetchEvaluationById] Auto mapping initialization error:', mapErr);
+            }
+          }
+        }
+      }
+    }
   }
 
   return evaluation;
@@ -456,7 +562,7 @@ export async function updateEvaluationMarks(
       : answerBook.examId;
 
   // 1. Fetch authoritative questions for this exam from MongoDB
-  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId);
+  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId, answerBook._id);
 
   // 2. Validate and calculate authoritative total
   if (data.questionMarks && Array.isArray(data.questionMarks)) {
@@ -541,7 +647,7 @@ export async function submitEvaluationFinal(
       : answerBook.examId;
 
   // 1. Fetch official questions for the exam from MongoDB
-  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId);
+  const authoritativeQuestions = await fetchAuthoritativeQuestions(examId, answerBook._id);
 
   // 2. Build target question marks from submission payload or already saved state
   const targetQuestionMarks =
@@ -570,6 +676,33 @@ export async function submitEvaluationFinal(
     authoritativeQuestions,
     true // isSubmitting = true
   );
+
+  // 3b. Mandatory Examiner Review Requirement (Requirement 7 & 16)
+  // 1. Verify that every question entry has been opened / reviewed by the examiner
+  const unreviewedQuestions = validatedList.filter((qm: any) => !qm.examinerReviewed);
+  if (unreviewedQuestions.length > 0) {
+    const unreviewedNumbers = unreviewedQuestions.map((q: any) => `Q${q.questionNumber}`).join(', ');
+    const error: any = new Error(
+      `Review all questions before submitting. The following questions have not been reviewed by the examiner: ${unreviewedNumbers}`
+    );
+    error.status = 400;
+    error.code = 'UNREVIEWED_QUESTIONS';
+    throw error;
+  }
+
+  // 2. Second Fix: Verify every question has a final examiner decision
+  const unresolvedQuestions = validatedList.filter(
+    (qm: any) => qm.status === 'NOT_STARTED' || qm.status === undefined
+  );
+  if (unresolvedQuestions.length > 0) {
+    const unresolvedNumbers = unresolvedQuestions.map((q: any) => `Q${q.questionNumber}`).join(', ');
+    const error: any = new Error(
+      `${unresolvedNumbers} has been reviewed but does not have a final examiner decision. Every question must have final marks entered or be marked as NOT_ATTEMPTED before submission.`
+    );
+    error.status = 400;
+    error.code = 'QUESTION_DECISION_REQUIRED';
+    throw error;
+  }
 
   // 4. Validate against examination maximumMarks if available
   const exam = await Exam.findById(examId);
@@ -724,39 +857,6 @@ export async function requestAISuggestionForQuestion(
     await answerBook.save();
   }
 
-  // 5. Check for existing cached analysis to avoid redundant duplicate AI generation
-  const existingIndex = evaluation.questionMarks.findIndex(
-    (q) => q.questionNumber === questionNumber
-  );
-  const existingQm = existingIndex >= 0 ? evaluation.questionMarks[existingIndex] : null;
-
-  // Stale cache gate:
-  // If we have an active QuestionPaper, cached analysis is ONLY valid if it was generated
-  // for THIS exact questionPaperId. If questionPaperId changed or is missing, ignore cache.
-  let isCacheValid = false;
-  if (existingQm?.aiAnalysis?.generatedAt && !options.forceRefresh) {
-    if (activeQuestionPaper) {
-      const cachedQpId = existingQm.aiAnalysis.questionPaperId?.toString();
-      if (cachedQpId && cachedQpId === activeQuestionPaper._id.toString()) {
-        isCacheValid = true;
-      }
-    } else {
-      // Fallback mode without question paper:
-      if (!existingQm.aiAnalysis.questionPaperId) {
-        isCacheValid = true;
-      }
-    }
-  }
-
-  if (isCacheValid && existingQm?.aiAnalysis) {
-    return {
-      cached: true,
-      aiAnalysis: existingQm.aiAnalysis,
-      evaluationId: evaluation._id.toString(),
-      questionNumber,
-    };
-  }
-
   const examId =
     typeof answerBook.examId === 'object' &&
     answerBook.examId !== null &&
@@ -781,7 +881,7 @@ export async function requestAISuggestionForQuestion(
   let targetLanguage: string | undefined = undefined;
   let questionSource = 'EXAM_QUESTIONS_FALLBACK';
 
-  // 6. QUESTION PAPER MUST TAKE ABSOLUTE PRIORITY
+  // 5. QUESTION PAPER MUST TAKE ABSOLUTE PRIORITY
   if (activeQuestionPaper) {
     const isVerified = Boolean(
       activeQuestionPaper.verifiedQuestions && activeQuestionPaper.verifiedQuestions.length > 0
@@ -825,7 +925,7 @@ export async function requestAISuggestionForQuestion(
       throw error;
     }
   } else {
-    // 7. Fallback to Question collection ONLY when NO QuestionPaper is attached at all
+    // Fallback to Question collection ONLY when NO QuestionPaper is attached at all
     const question = await Question.findOne({ examId, questionNumber });
     if (question) {
       targetQuestionText = question.text;
@@ -857,7 +957,7 @@ Question Text   : ${targetQuestionText}
 Maximum Marks   : ${targetMaximumMarks}
 Question Source : ${questionSource}\n`);
 
-  // 5. Determine mapped pages for this question from AnswerBook questionPageMapping or options
+  // 6. Determine mapped pages for this question from AnswerBook questionPageMapping or options
   let targetPageNumbers: number[] = [];
   const mapping = answerBook.questionPageMapping?.find(
     (m: IQuestionPageMapping) => m.questionNumber === questionNumber
@@ -877,6 +977,67 @@ Question Source : ${questionSource}\n`);
     error.status = 400;
     error.code = 'QUESTION_PAGES_NOT_MAPPED';
     throw error;
+  }
+
+  // 7. Check for existing cached analysis - verify it is NOT stale
+  const existingIndex = evaluation.questionMarks.findIndex(
+    (q) => q.questionNumber === questionNumber
+  );
+  const existingQm = existingIndex >= 0 ? evaluation.questionMarks[existingIndex] : null;
+
+  let isCacheValid = false;
+  const isPlaceholderAnalysis =
+    !existingQm?.aiAnalysis?.confidence ||
+    existingQm.aiAnalysis.confidence === 0;
+
+  if (existingQm?.aiAnalysis?.generatedAt && !isPlaceholderAnalysis && !options.forceRefresh) {
+    let qpMatch = false;
+    if (activeQuestionPaper) {
+      const cachedQpId = existingQm.aiAnalysis.questionPaperId?.toString();
+      if (cachedQpId && cachedQpId === activeQuestionPaper._id.toString()) {
+        qpMatch = true;
+      }
+    } else {
+      if (!existingQm.aiAnalysis.questionPaperId) {
+        qpMatch = true;
+      }
+    }
+
+    const marksMatch =
+      existingQm.aiAnalysis.questionMaxMarks !== undefined
+        ? existingQm.aiAnalysis.questionMaxMarks === targetMaximumMarks
+        : existingQm.aiAnalysis.maxMarks <= targetMaximumMarks;
+
+    const cachedPages = Array.isArray(existingQm.aiAnalysis.mappedPages)
+      ? [...existingQm.aiAnalysis.mappedPages].sort((a, b) => a - b)
+      : [];
+    const currentPages = [...targetPageNumbers].sort((a, b) => a - b);
+    const pagesMatch =
+      cachedPages.length > 0 &&
+      cachedPages.length === currentPages.length &&
+      cachedPages.every((p, idx) => p === currentPages[idx]);
+
+    const currentHash = crypto.createHash('md5').update(targetQuestionText).digest('hex');
+    const hashMatch =
+      !existingQm.aiAnalysis.questionTextHash ||
+      existingQm.aiAnalysis.questionTextHash === currentHash;
+
+    if (qpMatch && marksMatch && pagesMatch && hashMatch) {
+      isCacheValid = true;
+    } else {
+      console.log(
+        `[AI STALE DETECTED] Cached AI result for Q${questionNumber} invalidated (qpMatch=${qpMatch}, marksMatch=${marksMatch}, pagesMatch=${pagesMatch}, hashMatch=${hashMatch}). Re-running evaluation.`
+      );
+    }
+  }
+
+  if (isCacheValid && existingQm?.aiAnalysis) {
+    return {
+      cached: true,
+      aiAnalysis: existingQm.aiAnalysis,
+      evaluationId: evaluation._id.toString(),
+      questionNumber,
+    };
   }
 
   // Fetch all mapped AnswerPages in strict ascending page order
@@ -927,15 +1088,27 @@ Question Source : ${questionSource}\n`);
 
     // 2. If not read from disk, use secure Cloudinary URL
     if (!imageLoaded && p.cloudinary?.publicId) {
-      const signed = generateAuthorizedMediaUrl(p.cloudinary.publicId, {
-        resourceType: p.cloudinary.resourceType,
-        deliveryType: p.cloudinary.deliveryType,
-        format: p.cloudinary.format,
-        expiresInSeconds: 3600,
-      });
-      if (signed?.secureUrl) {
-        studentImages.push(signed.secureUrl);
+      try {
+        const signed = generateAuthorizedMediaUrl(p.cloudinary.publicId, {
+          resourceType: p.cloudinary.resourceType,
+          deliveryType: p.cloudinary.deliveryType,
+          format: p.cloudinary.format,
+          expiresInSeconds: 3600,
+        });
+        if (signed?.secureUrl) {
+          studentImages.push(signed.secureUrl);
+          imageLoaded = true;
+        }
+      } catch (err) {
+        console.warn(`[AI EVAL] Failed to generate signed Cloudinary URL:`, err);
       }
+    }
+
+    // 3. Fallback to existing imageUrl or cloudinary.secureUrl (zero filesystem dependency)
+    const fallbackUrl = p.cloudinary?.secureUrl || (p as any).imageUrl;
+    if (!imageLoaded && fallbackUrl) {
+      studentImages.push(fallbackUrl);
+      imageLoaded = true;
     }
 
     if (p.ocr?.text && p.ocr.text.trim().length > 0) {
@@ -991,10 +1164,11 @@ Question Source : ${questionSource}\n`);
   // 7. Store AI analysis in evaluation question data model (NEVER touching final examiner marks)
   const actualModelName = assistantResult.model || process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
   const aiAnalysisData = {
-    questionPaperId: activeQuestionPaper ? activeQuestionPaper._id : undefined,
+    questionPaperId: activeQuestionPaper ? activeQuestionPaper._id : (answerBook.questionPaperId || undefined),
     suggestedMarks: assistantResult.suggestedMarks,
     minMarks: assistantResult.minMarks,
     maxMarks: assistantResult.maxMarks,
+    questionMaxMarks: targetMaximumMarks,
     confidence: assistantResult.confidence,
     needsHumanReview: assistantResult.needsHumanReview,
     criteria: assistantResult.criteria,
@@ -1002,15 +1176,26 @@ Question Source : ${questionSource}\n`);
     reasoningSummary: assistantResult.reasoningSummary,
     generatedAt: new Date(),
     model: actualModelName,
+    mappedPages: [...targetPageNumbers].sort((a, b) => a - b),
+    questionTextHash: crypto.createHash('md5').update(targetQuestionText).digest('hex'),
   };
+
+  const calculatedAiStatus =
+    assistantResult.needsHumanReview ||
+    (assistantResult.confidence !== undefined && assistantResult.confidence < 0.75)
+      ? 'NEEDS_REVIEW'
+      : 'COMPLETED';
 
   if (existingIndex >= 0) {
     evaluation.questionMarks[existingIndex].aiAnalysis = aiAnalysisData;
+    evaluation.questionMarks[existingIndex].aiStatus = calculatedAiStatus;
+    evaluation.questionMarks[existingIndex].aiError = undefined;
   } else {
     evaluation.questionMarks.push({
       questionNumber,
       marks: 0,
       status: 'NOT_STARTED',
+      aiStatus: calculatedAiStatus,
       aiAnalysis: aiAnalysisData,
     });
   }
@@ -1050,3 +1235,40 @@ Question Source : ${questionSource}\n`);
     questionNumber,
   };
 }
+
+/**
+ * Marks a specific question as reviewed/inspected by the assigned examiner.
+ */
+export async function markQuestionReviewed(
+  evaluationId: string,
+  questionNumber: number,
+  examinerId: string
+) {
+  const evaluation = await Evaluation.findById(evaluationId);
+  if (!evaluation) {
+    const error: any = new Error('Evaluation not found');
+    error.status = 404;
+    error.code = 'EVALUATION_NOT_FOUND';
+    throw error;
+  }
+
+  const existingIdx = evaluation.questionMarks.findIndex(
+    (qm) => qm.questionNumber === questionNumber
+  );
+  if (existingIdx >= 0) {
+    evaluation.questionMarks[existingIdx].examinerReviewed = true;
+    evaluation.questionMarks[existingIdx].reviewedAt = new Date();
+  } else {
+    evaluation.questionMarks.push({
+      questionNumber,
+      marks: 0,
+      status: 'NOT_STARTED',
+      examinerReviewed: true,
+      reviewedAt: new Date(),
+    });
+  }
+
+  await evaluation.save();
+  return evaluation;
+}
+

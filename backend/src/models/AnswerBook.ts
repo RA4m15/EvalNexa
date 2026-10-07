@@ -57,12 +57,23 @@ export function validateProcessingStateTransition(
 
 export interface IQuestionPageMapping {
   questionNumber: number;
+  questionLabel?: string;
   pages: number[];
   verified?: boolean;
   confidence?: number;
   reason?: string;
+  evidence?: string[];
   needsHumanReview?: boolean;
-  source?: 'AI_SUGGESTED' | 'EXAMINER_VERIFIED';
+  source?:
+    | 'AUTO_EXPLICIT'
+    | 'AUTO_SEMANTIC'
+    | 'AUTO_MULTIMODAL'
+    | 'AUTO_CONTINUATION'
+    | 'AI_SUGGESTED'
+    | 'EXAMINER_VERIFIED';
+  mappingSource?: string;
+  examinerVerified?: boolean;
+  isContinuation?: boolean;
   aiSuggestedPages?: number[];
   aiConfidence?: number;
   aiReason?: string;
@@ -184,16 +195,28 @@ const AnswerBookSchema = new Schema<IAnswerBook>(
     questionPageMapping: [
       {
         questionNumber: { type: Number, required: true },
+        questionLabel: { type: String, trim: true },
         pages: [{ type: Number, required: true }],
         verified: { type: Boolean, default: false },
         confidence: { type: Number },
         reason: { type: String, trim: true },
+        evidence: [{ type: String, trim: true }],
         needsHumanReview: { type: Boolean, default: false },
         source: {
           type: String,
-          enum: ['AI_SUGGESTED', 'EXAMINER_VERIFIED'],
+          enum: [
+            'AUTO_EXPLICIT',
+            'AUTO_SEMANTIC',
+            'AUTO_MULTIMODAL',
+            'AUTO_CONTINUATION',
+            'AI_SUGGESTED',
+            'EXAMINER_VERIFIED',
+          ],
           default: 'AI_SUGGESTED',
         },
+        mappingSource: { type: String, trim: true },
+        examinerVerified: { type: Boolean, default: false },
+        isContinuation: { type: Boolean, default: false },
         aiSuggestedPages: [{ type: Number }],
         aiConfidence: { type: Number },
         aiReason: { type: String, trim: true },

@@ -3,11 +3,12 @@ import { Evaluation, IFullAnalysisJob, IEvaluationQuestionMark } from '../models
 import { AnswerBook, IQuestionPageMapping } from '../models/AnswerBook';
 import { AnswerPage } from '../models/AnswerPage';
 import { QuestionPaper } from '../models/QuestionPaper';
-import { geminiManager } from '../config/gemini';
+import { geminiManager, getAiPolicyConfig, isMappingConfident, evaluateConfidenceBand } from '../config';
 import { requestAISuggestionForQuestion } from './evaluations.service';
 import { emitToAll, emitToUser } from '../sockets';
 import { areEntityIdsEqual } from '../utils/identity';
 import { logAuditAction } from './audit.service';
+import { autoMapAnswerBookPages } from './pageMapping.service';
 
 // In-memory registry to track currently active jobs and enable cancellation
 const activeJobs = new Map<string, { abortController: AbortController; evaluationId: string }>();
@@ -48,247 +49,17 @@ async function runWithConcurrency<T, R>(
 
 /**
  * Identifies which answer book pages correspond to which questions.
- * Inspects OCR text and page numbers across all pages, uses Gemini or heuristic matching,
- * and strictly respects existing examiner-verified mappings.
+ * Delegates to the robust dynamic page mapping pipeline in pageMapping.service.ts
+ * which inspects explicit headers, OCR key domain concepts, rubric/reference answer
+ * matching, continuation page sequence, and multimodal image understanding.
  */
 export async function identifyQuestionPageMappings(params: {
   answerBook: any;
   questionPaper: any;
   answerPages: any[];
+  forceRemap?: boolean;
 }): Promise<IQuestionPageMapping[]> {
-  const { answerBook, questionPaper, answerPages } = params;
-
-  const questions =
-    questionPaper.verifiedQuestions && questionPaper.verifiedQuestions.length > 0
-      ? questionPaper.verifiedQuestions
-      : questionPaper.extractedQuestions || [];
-
-  if (questions.length === 0 || answerPages.length === 0) {
-    return answerBook.questionPageMapping || [];
-  }
-
-  const existingMappings = answerBook.questionPageMapping || [];
-
-  // Build condensed representation of pages for AI
-  const pageSnippets = answerPages.map((p) => ({
-    pageNumber: p.pageNumber,
-    snippet: (p.ocr?.text || '').slice(0, 500).replace(/\s+/g, ' ').trim(),
-  }));
-
-  const questionBriefs = questions.map((q: any) => ({
-    questionNumber: q.questionNumber,
-    text: q.text.slice(0, 160),
-    maximumMarks: q.maximumMarks,
-  }));
-
-  let detectedMappings: Array<{
-    questionNumber: number;
-    pages: number[];
-    confidence: number;
-    reason: string;
-    needsHumanReview: boolean;
-  }> = [];
-
-  // 1. Try AI-based page identification using Gemini
-  const client = geminiManager.getClient();
-  if (client) {
-    try {
-      const candidateModels = geminiManager.getCandidateModels();
-      const prompt = `You are an examination script page indexer.
-Analyze the following student answer script pages and map each question to the exact page numbers where its answer appears.
-
-STRICT ACCURACY RULES:
-- Only map pages if you detect explicit question headers (e.g. "Q1", "Ans 1", "Question 1", "1.") or clear question problem text and methodology.
-- DO NOT GUESS OR ESTIMATE based on page position or question sequence.
-- If you CANNOT confidently determine which pages belong to a question, return "pages": [] with confidence: 0.0 and needsHumanReview: true.
-- If detection has low or uncertain confidence (< 0.75), set needsHumanReview: true.
-- A question may span multiple contiguous pages (e.g. [1, 2] or [3, 4, 5]).
-
-QUESTIONS TO MAP:
-${JSON.stringify(questionBriefs, null, 2)}
-
-STUDENT SCRIPT PAGES:
-${JSON.stringify(pageSnippets, null, 2)}
-
-Return a JSON array:
-[
-  {
-    "questionNumber": 1,
-    "pages": [1, 2],
-    "confidence": 0.92,
-    "reason": "Explicit 'Question 1' header detected on page 1 with answer continuing on page 2",
-    "needsHumanReview": false
-  },
-  {
-    "questionNumber": 2,
-    "pages": [],
-    "confidence": 0.0,
-    "reason": "No unambiguous question header or answer content detected. Human review required.",
-    "needsHumanReview": true
-  }
-]`;
-
-      for (const m of candidateModels) {
-        try {
-          const response = await client.models.generateContent({
-            model: m,
-            contents: [prompt],
-            config: {
-              responseMimeType: 'application/json',
-              temperature: 0.1,
-            },
-          });
-
-          const rawText = response.text || '';
-          if (rawText) {
-            const parsed = JSON.parse(rawText);
-            if (Array.isArray(parsed)) {
-              detectedMappings = parsed;
-              break;
-            }
-          }
-        } catch (modelErr) {
-          // try next model
-        }
-      }
-    } catch (aiErr) {
-      console.warn('[FullAnalysisService] AI page mapping warning:', aiErr);
-    }
-  }
-
-  // 2. Pattern matching per page if AI returned empty or failed
-  if (detectedMappings.length === 0) {
-    questions.forEach((q: any) => {
-      const qNum = q.questionNumber;
-      const matchedPages: number[] = [];
-      let foundReason = '';
-
-      // Check regex for explicit Question/Answer headers on each page
-      const qPatterns = [
-        new RegExp(`(?:question|q|ans|answer)\\s*#?\\s*${qNum}\\b`, 'i'),
-        new RegExp(`\\b${qNum}\\s*[.)-]\\s*(?:[a-z]|${q.text.slice(0, 20)})`, 'i'),
-      ];
-
-      for (const p of answerPages) {
-        const text = p.ocr?.text || '';
-        if (qPatterns.some((pattern) => pattern.test(text))) {
-          matchedPages.push(p.pageNumber);
-        }
-      }
-
-      if (matchedPages.length > 0) {
-        // Case A: Explicit header found
-        foundReason = `Detected Question ${qNum} header in transcribed page text`;
-        detectedMappings.push({
-          questionNumber: qNum,
-          pages: matchedPages,
-          confidence: 0.85,
-          reason: foundReason,
-          needsHumanReview: false,
-        });
-      } else {
-        // Case B: Cannot determine question pages. NEVER guess proportionally!
-        detectedMappings.push({
-          questionNumber: qNum,
-          pages: [],
-          confidence: 0.0,
-          reason: `No explicit Question ${qNum} header or answer text found in script. Human review required.`,
-          needsHumanReview: true,
-        });
-      }
-    });
-  }
-
-  // 3. Merge with existing mappings while strictly preserving manual examiner mappings
-  const finalMappings: IQuestionPageMapping[] = [];
-
-  for (const q of questions) {
-    const qNum = q.questionNumber;
-    const existing = existingMappings.find((m: IQuestionPageMapping) => m.questionNumber === qNum);
-    const detected = detectedMappings.find((d) => d.questionNumber === qNum) || {
-      questionNumber: qNum,
-      pages: [],
-      confidence: 0.0,
-      reason: 'No mapping detected from script evidence',
-      needsHumanReview: true,
-    };
-
-    if (existing && existing.verified) {
-      // Manual examiner mapping is AUTHORITATIVE. Do NOT overwrite.
-      const hasAiProposal = detected.pages && detected.pages.length > 0;
-      const isConflicting =
-        hasAiProposal &&
-        (detected.pages.length !== existing.pages.length ||
-          !detected.pages.every((p) => existing.pages.includes(p)));
-
-      finalMappings.push({
-        questionNumber: qNum,
-        pages: existing.pages, // Keep examiner's mapped pages
-        verified: true,
-        source: 'EXAMINER_VERIFIED',
-        confidence: existing.confidence || 1.0,
-        reason: existing.reason || 'Manually verified by examiner',
-        needsHumanReview: false,
-        aiSuggestedPages: isConflicting ? detected.pages : undefined,
-        aiConfidence: isConflicting ? detected.confidence : undefined,
-        aiReason: isConflicting ? detected.reason : undefined,
-      });
-    } else {
-      const detectedPages = Array.isArray(detected.pages) ? detected.pages : [];
-      const hasPages = detectedPages.length > 0;
-      const isLowConfidence = detected.confidence < 0.75;
-
-      if (!hasPages) {
-        // Case B: Unresolved mapping -> Leave empty and mark for human review
-        finalMappings.push({
-          questionNumber: qNum,
-          pages: [],
-          verified: false,
-          source: 'AI_SUGGESTED',
-          confidence: 0.0,
-          reason: detected.reason || `Unable to detect Question ${qNum} answer pages. Examiner review required.`,
-          needsHumanReview: true,
-        });
-      } else if (isLowConfidence) {
-        // Case C: Probable mapping with low confidence -> Suggest only, mark for review
-        finalMappings.push({
-          questionNumber: qNum,
-          pages: detectedPages,
-          verified: false,
-          source: 'AI_SUGGESTED',
-          confidence: detected.confidence,
-          reason: detected.reason || 'Probable mapping detected with low confidence',
-          needsHumanReview: true,
-          aiSuggestedPages: detectedPages,
-          aiConfidence: detected.confidence,
-          aiReason: detected.reason,
-        });
-      } else {
-        // Case A: High-confidence detection (>= 0.75)
-        finalMappings.push({
-          questionNumber: qNum,
-          pages: detectedPages,
-          verified: false,
-          source: 'AI_SUGGESTED',
-          confidence: detected.confidence,
-          reason: detected.reason || `Detected Question ${qNum} answer pages`,
-          needsHumanReview: false,
-        });
-      }
-    }
-  }
-
-  // Update AnswerBook record
-  answerBook.questionPageMapping = finalMappings;
-  await answerBook.save();
-
-  // Notify frontend via Socket.IO
-  emitToAll('answerbook.mapping.updated', {
-    answerBookId: answerBook._id.toString(),
-    mappings: finalMappings,
-  });
-
-  return finalMappings;
+  return autoMapAnswerBookPages(params);
 }
 
 /**
@@ -403,12 +174,19 @@ export async function startFullAnswerBookAnalysis(
     if (existingIdx >= 0) {
       evaluation.questionMarks[existingIdx].aiStatus = 'QUEUED';
       evaluation.questionMarks[existingIdx].aiError = undefined;
+      evaluation.questionMarks[existingIdx].questionLabel = vq.questionLabel;
+      evaluation.questionMarks[existingIdx].section = vq.section;
+      evaluation.questionMarks[existingIdx].subquestion = vq.subquestion;
     } else {
       evaluation.questionMarks.push({
         questionNumber: qNum,
+        questionLabel: vq.questionLabel,
+        section: vq.section,
+        subquestion: vq.subquestion,
         marks: 0,
         status: 'NOT_STARTED',
         aiStatus: 'QUEUED',
+        examinerReviewed: false,
       });
     }
   }
@@ -482,7 +260,7 @@ export async function startFullAnswerBookAnalysis(
 /**
  * Background execution pipeline for full answer book analysis
  */
-async function executeFullAnalysisBackground(params: {
+export async function executeFullAnalysisBackground(params: {
   evaluationId: string;
   jobId: string;
   answerBookId: string;
@@ -552,8 +330,10 @@ async function executeFullAnalysisBackground(params: {
 
     const verifiedQuestions = questionPaper.verifiedQuestions || [];
 
-    // Step 4: Evaluate Each Question with Controlled Concurrency (Limit = 2)
-    await runWithConcurrency(verifiedQuestions, 2, async (vq, idx) => {
+    const policy = getAiPolicyConfig();
+
+    // Step 4: Evaluate Each Question with Controlled Concurrency
+    await runWithConcurrency(verifiedQuestions, policy.concurrencyLimit, async (vq, idx) => {
       if (abortController.signal.aborted) return;
 
       const qNum = vq.questionNumber;
@@ -564,7 +344,7 @@ async function executeFullAnalysisBackground(params: {
         {
           $set: {
             'questionMarks.$.aiStatus': 'ANALYZING',
-            'fullAnalysisJob.currentStep': `Evaluating Question ${qNum}...`,
+            'fullAnalysisJob.currentStep': `Evaluating Question ${vq.questionLabel || qNum}...`,
             'fullAnalysisJob.currentQuestionNumber': qNum,
           },
         }
@@ -585,12 +365,20 @@ async function executeFullAnalysisBackground(params: {
       const hasPages = Boolean(qMapping?.pages && qMapping.pages.length > 0);
 
       if (!hasPages) {
+        const unresolvedReason =
+          qMapping?.reason ||
+          `No explicit answer pages were detected for Question ${vq.questionLabel || qNum}. Examiner review and page assignment required.`;
+
         await Evaluation.updateOne(
           { _id: evaluation._id, 'questionMarks.questionNumber': qNum },
           {
             $set: {
               'questionMarks.$.aiStatus': 'NEEDS_REVIEW',
-              'questionMarks.$.aiError': 'Unresolved page mapping. Examiner review required before AI evaluation.',
+              'questionMarks.$.aiError': unresolvedReason,
+              'questionMarks.$.aiAnalysis': null,
+              'questionMarks.$.questionLabel': vq.questionLabel,
+              'questionMarks.$.section': vq.section,
+              'questionMarks.$.subquestion': vq.subquestion,
             },
             $inc: {
               'fullAnalysisJob.completedQuestions': 1,
@@ -604,13 +392,14 @@ async function executeFullAnalysisBackground(params: {
           answerBookId,
           questionNumber: qNum,
           aiStatus: 'NEEDS_REVIEW',
-          aiError: 'Unresolved page mapping. Examiner review required before AI evaluation.',
+          aiError: unresolvedReason,
+          aiAnalysis: null,
         });
         return;
       }
 
       try {
-        // Run AI evaluation using existing authoritative EvaluationAssistantService flow
+        // Run AI evaluation using canonical EvaluationAssistantService flow
         const result = await requestAISuggestionForQuestion(evaluationId, qNum, {
           userRole: options.userRole,
           userId: options.userId,
@@ -623,7 +412,8 @@ async function executeFullAnalysisBackground(params: {
 
         const isNeedsReview =
           result.aiAnalysis?.needsHumanReview ||
-          (result.aiAnalysis?.confidence !== undefined && result.aiAnalysis.confidence < 0.75);
+          (result.aiAnalysis?.confidence !== undefined &&
+            result.aiAnalysis.confidence < policy.aiGradingConfidence.medium);
 
         const newStatus = isNeedsReview ? 'NEEDS_REVIEW' : 'COMPLETED';
 
@@ -634,6 +424,9 @@ async function executeFullAnalysisBackground(params: {
             $set: {
               'questionMarks.$.aiStatus': newStatus,
               'questionMarks.$.aiError': null,
+              'questionMarks.$.questionLabel': vq.questionLabel,
+              'questionMarks.$.section': vq.section,
+              'questionMarks.$.subquestion': vq.subquestion,
             },
             $inc: {
               'fullAnalysisJob.completedQuestions': 1,
@@ -691,14 +484,22 @@ async function executeFullAnalysisBackground(params: {
     if (!finalEval || !finalEval.fullAnalysisJob) return;
 
     const failedCount = finalEval.fullAnalysisJob.failedQuestions || 0;
-    const finalStatus = failedCount > 0 ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED';
+    const needsReviewCount = finalEval.fullAnalysisJob.needsReviewQuestions || 0;
+    const finalStatus =
+      failedCount > 0
+        ? 'COMPLETED_WITH_ERRORS'
+        : needsReviewCount > 0
+          ? 'COMPLETED_WITH_REVIEW'
+          : 'COMPLETED';
 
     finalEval.fullAnalysisJob.status = finalStatus;
     finalEval.fullAnalysisJob.completedAt = new Date();
     finalEval.fullAnalysisJob.currentStep =
       finalStatus === 'COMPLETED'
         ? 'All questions evaluated successfully.'
-        : `Completed with ${failedCount} question(s) requiring retry.`;
+        : finalStatus === 'COMPLETED_WITH_REVIEW'
+          ? `Analysis complete. ${needsReviewCount} question(s) flagged for examiner review.`
+          : `Completed with ${failedCount} question(s) requiring retry.`;
 
     await finalEval.save();
 

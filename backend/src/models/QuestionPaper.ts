@@ -36,6 +36,7 @@ const RubricItemSchema = new Schema(
 const ExtractedQuestionSchema = new Schema(
   {
     questionNumber: { type: Number, required: true },
+    questionLabel: { type: String, trim: true },
     section: { type: String, trim: true },
     subquestion: { type: String, trim: true },
     text: { type: String, required: true, trim: true },

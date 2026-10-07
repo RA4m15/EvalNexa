@@ -241,3 +241,34 @@ export async function retryQuestionAnalysisController(req: AuthRequest, res: Res
     });
   }
 }
+
+export async function markQuestionReviewedController(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, questionNumber } = req.params;
+    const qNum = parseInt(questionNumber, 10);
+    if (isNaN(qNum)) {
+      res.status(400).json({ success: false, message: 'Invalid question number' });
+      return;
+    }
+
+    const evaluation = await evaluationsService.markQuestionReviewed(
+      id,
+      qNum,
+      req.user!._id.toString()
+    );
+
+    res.json({
+      success: true,
+      message: `Question Q${qNum} marked as reviewed`,
+      data: evaluation.questionMarks.find((qm) => qm.questionNumber === qNum),
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to mark question reviewed',
+      code: error.code || 'REVIEW_ERROR',
+    });
+  }
+}
+
