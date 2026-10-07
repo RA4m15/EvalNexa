@@ -6,6 +6,7 @@ export interface IEvaluationQuestionAiAnalysis {
   suggestedMarks: number;
   minMarks: number;
   maxMarks: number;
+  questionMaxMarks?: number;
   confidence: number;
   needsHumanReview: boolean;
   criteria: Array<{
@@ -18,16 +19,23 @@ export interface IEvaluationQuestionAiAnalysis {
   reasoningSummary: string;
   generatedAt: Date;
   model: string;
+  mappedPages?: number[];
+  questionTextHash?: string;
 }
 
 export interface IEvaluationQuestionMark {
   questionNumber: number;
+  questionLabel?: string;
+  section?: string;
+  subquestion?: string;
   marks: number;
   status: 'NOT_STARTED' | 'MARKED' | 'FLAGGED' | 'NOT_ATTEMPTED';
   comment?: string;
   aiStatus?: 'NOT_STARTED' | 'QUEUED' | 'ANALYZING' | 'COMPLETED' | 'NEEDS_REVIEW' | 'FAILED';
   aiError?: string;
   aiAnalysis?: IEvaluationQuestionAiAnalysis;
+  examinerReviewed?: boolean;
+  reviewedAt?: Date;
 }
 
 export interface IFullAnalysisJob {
@@ -36,7 +44,9 @@ export interface IFullAnalysisJob {
     | 'NOT_STARTED'
     | 'QUEUED'
     | 'RUNNING'
+    | 'PARTIAL'
     | 'COMPLETED'
+    | 'COMPLETED_WITH_REVIEW'
     | 'COMPLETED_WITH_ERRORS'
     | 'FAILED'
     | 'CANCELLED';
@@ -105,7 +115,9 @@ const EvaluationSchema = new Schema<IEvaluation>(
               'NOT_STARTED',
               'QUEUED',
               'RUNNING',
+              'PARTIAL',
               'COMPLETED',
+              'COMPLETED_WITH_REVIEW',
               'COMPLETED_WITH_ERRORS',
               'FAILED',
               'CANCELLED',
@@ -132,6 +144,9 @@ const EvaluationSchema = new Schema<IEvaluation>(
     questionMarks: [
       {
         questionNumber: { type: Number, required: true },
+        questionLabel: { type: String, trim: true },
+        section: { type: String, trim: true },
+        subquestion: { type: String, trim: true },
         marks: { type: Number, required: true, default: 0, min: 0 },
         status: {
           type: String,
@@ -152,6 +167,7 @@ const EvaluationSchema = new Schema<IEvaluation>(
               suggestedMarks: { type: Number },
               minMarks: { type: Number },
               maxMarks: { type: Number },
+              questionMaxMarks: { type: Number },
               confidence: { type: Number },
               needsHumanReview: { type: Boolean },
               criteria: [
@@ -166,11 +182,15 @@ const EvaluationSchema = new Schema<IEvaluation>(
               reasoningSummary: { type: String },
               generatedAt: { type: Date },
               model: { type: String },
+              mappedPages: { type: [Number], default: undefined },
+              questionTextHash: { type: String, trim: true },
             },
             { _id: false }
           ),
           default: undefined,
         },
+        examinerReviewed: { type: Boolean, default: false },
+        reviewedAt: { type: Date },
       },
     ],
     startedAt: { type: Date },

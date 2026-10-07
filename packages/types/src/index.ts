@@ -145,12 +145,23 @@ export interface AnswerBook {
 
 export interface QuestionPageMapping {
   questionNumber: number;
+  questionLabel?: string;
   pages: number[];
   verified?: boolean;
   confidence?: number;
   reason?: string;
+  evidence?: string[];
   needsHumanReview?: boolean;
-  source?: 'AI_SUGGESTED' | 'EXAMINER_VERIFIED';
+  source?:
+    | 'AUTO_EXPLICIT'
+    | 'AUTO_SEMANTIC'
+    | 'AUTO_MULTIMODAL'
+    | 'AUTO_CONTINUATION'
+    | 'AI_SUGGESTED'
+    | 'EXAMINER_VERIFIED';
+  mappingSource?: string;
+  examinerVerified?: boolean;
+  isContinuation?: boolean;
   aiSuggestedPages?: number[];
   aiConfidence?: number;
   aiReason?: string;
@@ -181,7 +192,9 @@ export type FullAnalysisJobStatus =
   | 'NOT_STARTED'
   | 'QUEUED'
   | 'RUNNING'
+  | 'PARTIAL'
   | 'COMPLETED'
+  | 'COMPLETED_WITH_REVIEW'
   | 'COMPLETED_WITH_ERRORS'
   | 'FAILED'
   | 'CANCELLED';
@@ -208,6 +221,7 @@ export interface QuestionMarkAiAnalysis {
   suggestedMarks: number;
   minMarks: number;
   maxMarks: number;
+  questionMaxMarks?: number;
   confidence: number;
   needsHumanReview: boolean;
   criteria: Array<{
@@ -220,16 +234,23 @@ export interface QuestionMarkAiAnalysis {
   reasoningSummary: string;
   generatedAt: string;
   model: string;
+  mappedPages?: number[];
+  questionTextHash?: string;
 }
 
 export interface QuestionMarkItem {
   questionNumber: number;
+  questionLabel?: string;
+  section?: string;
+  subquestion?: string;
   marks: number;
   status: QuestionMarkStatus;
   comment?: string;
   aiStatus?: QuestionAiAnalysisStatus;
   aiError?: string;
   aiAnalysis?: QuestionMarkAiAnalysis;
+  examinerReviewed?: boolean;
+  reviewedAt?: string;
 }
 
 // --- Evaluation ---
@@ -258,6 +279,9 @@ export interface Question {
   _id: string;
   examId: string | Exam;
   questionNumber: number;
+  questionLabel?: string;
+  section?: string;
+  subquestion?: string;
   text: string;
   maximumMarks: number;
   rubric: QuestionRubricItem[];
@@ -274,6 +298,7 @@ export type QuestionPaperStatus = 'NOT_EXTRACTED' | 'EXTRACTED' | 'VERIFIED' | '
 
 export interface ExtractedQuestion {
   questionNumber: number;
+  questionLabel?: string;
   section?: string;
   subquestion?: string;
   text: string;

@@ -10,6 +10,7 @@ import {
   getFullAnalysisStatusController,
   cancelFullAnalysisController,
   retryQuestionAnalysisController,
+  markQuestionReviewedController,
 } from '../controllers/evaluations.controller';
 import { authenticate, authorize } from '../middleware/auth';
 import { validate } from '../middleware/validate';
@@ -79,6 +80,11 @@ router.post(
   aiAssistantLimiter,
   authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
   retryQuestionAnalysisController
+);
+router.post(
+  '/:id/questions/:questionNumber/review',
+  authorize('EXAMINER', 'MODERATOR', 'ADMIN'),
+  markQuestionReviewedController
 );
 
 export default router;
