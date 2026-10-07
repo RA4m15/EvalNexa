@@ -5,8 +5,7 @@ import { AnswerBook } from '../models/AnswerBook';
 import { AnswerPage } from '../models/AnswerPage';
 import { Question } from '../models/Question';
 import { Exam } from '../models/Exam';
-import fs from 'fs';
-import { config } from '../config';
+import { MultiModelOrchestrator } from './ai/MultiModelOrchestrator';
 
 // =============================================================================
 // TYPES & SCHEMAS
@@ -29,6 +28,18 @@ export interface EvaluationAssistantResult {
   missingConcepts: string[];
   reasoningSummary: string;
   model?: string;
+  ensembleMetadata?: {
+    modelsEvaluated: string[];
+    modelsRespondedCount: number;
+    agreementRatio: number;
+    scoreVariance: number;
+    individualScores: Array<{
+      model: string;
+      score: number;
+      latencyMs: number;
+    }>;
+    consensusStrategy: 'UNANIMOUS' | 'MAJORITY_QUORUM' | 'WEIGHTED_MEDIAN' | 'SINGLE_FALLBACK';
+  };
 }
 
 export interface EvaluationAssistantInput {
@@ -194,7 +205,7 @@ async function resolveImagePart(
 // PROMPT BUILDER
 // =============================================================================
 
-function buildEvaluationPrompt(input: EvaluationAssistantInput): string {
+export function buildEvaluationPrompt(input: EvaluationAssistantInput): string {
   const rubricText =
     input.rubric.length > 0
       ? input.rubric
@@ -510,7 +521,7 @@ export class EvaluationAssistantService {
       return generateEvaluativeResult(input, 'gemini-3.1-flash-lite');
     }
 
-    // 4. Execute AI Evaluation with @google/genai
+    // 4. Execute Multi-LLM Parallel Evaluation & Consensus
     try {
       const candidateModels = geminiManager.getCandidateModels();
       const preferredModel = candidateModels[0];
@@ -588,23 +599,27 @@ export class EvaluationAssistantService {
         parsedRaw = JSON.parse(cleaned);
       }
 
-      // Validate schema and constraints
-      const validatedResult = validateAndEnforceAssistantConstraints(parsedRaw, input);
+      // Validate schema and safety constraints
+      const validatedResult = validateAndEnforceAssistantConstraints(ensembleResult, input);
 
       const durationMs = Date.now() - startTime;
-      logAssistantEvent('info', 'AI evaluation suggestion generated successfully', {
+      logAssistantEvent('info', 'Multi-LLM evaluation consensus generated successfully', {
         durationMs,
         suggestedMarks: validatedResult.suggestedMarks,
         maximumMarks: input.maximumMarks,
         confidence: validatedResult.confidence,
         needsHumanReview: validatedResult.needsHumanReview,
         criteriaEvaluated: validatedResult.criteria.length,
-        model: usedModel,
+        model: ensembleResult.model,
+        modelsRespondedCount: ensembleResult.ensembleMetadata.modelsRespondedCount,
+        agreementRatio: ensembleResult.ensembleMetadata.agreementRatio,
+        consensusStrategy: ensembleResult.ensembleMetadata.consensusStrategy,
       });
 
       return {
         ...validatedResult,
-        model: usedModel,
+        model: ensembleResult.model,
+        ensembleMetadata: ensembleResult.ensembleMetadata,
       };
     } catch (error: any) {
       const durationMs = Date.now() - startTime;
