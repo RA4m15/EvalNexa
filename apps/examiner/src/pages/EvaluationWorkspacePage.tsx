@@ -11,6 +11,10 @@ import {
   QuestionMarkItem,
   QuestionMarkStatus,
   QuestionMarkAiAnalysis,
+  QuestionAiAnalysisStatus,
+  FullAnalysisJob,
+  FullAnalysisJobStatus,
+  QuestionPageMapping,
   QuestionPaper,
   ExtractedQuestion,
 } from '@evalnexa/types';
@@ -55,6 +59,18 @@ export function EvaluationWorkspacePage() {
   // AI Copilot state
   const [aiError, setAiError] = useState<string | null>(null);
   const [ignoredQuestions, setIgnoredQuestions] = useState<Record<number, boolean>>({});
+  const [activeJob, setActiveJob] = useState<FullAnalysisJob | null>(null);
+  const [showProgressModal, setShowProgressModal] = useState(false);
+
+  const getJobProgress = (job?: FullAnalysisJob | null) => ({
+    totalQuestions: job?.totalQuestions || 0,
+    completedQuestions: job?.completedQuestions || 0,
+    failedCount: job?.failedQuestions || 0,
+    needsReviewCount: job?.needsReviewQuestions || 0,
+    totalPages: job?.totalPages || 0,
+    analyzedPages: job?.analyzedPages || 0,
+    currentQuestionNumber: job?.currentQuestionNumber,
+  });
 
   useEffect(() => {
     setAiError(null);
@@ -75,6 +91,13 @@ export function EvaluationWorkspacePage() {
   const exam = answerBook && typeof answerBook.examId === 'object' ? (answerBook.examId as unknown as Exam) : null;
   const examId = exam?._id || (typeof answerBook?.examId === 'string' ? answerBook.examId : '');
 
+  // Synchronize fullAnalysisJob from evaluation on load
+  useEffect(() => {
+    if (evaluation?.fullAnalysisJob) {
+      setActiveJob(evaluation.fullAnalysisJob);
+    }
+  }, [evaluation?.fullAnalysisJob]);
+
   // Real-time synchronization
   useEffect(() => {
     const socket = getSocket();
@@ -85,17 +108,69 @@ export function EvaluationWorkspacePage() {
       queryClient.invalidateQueries({ queryKey: ['my-papers'] });
     };
 
-    const handleAiUpdated = (payload: { evaluationId?: string; answerBookId?: string; questionNumber?: number; aiAnalysis?: QuestionMarkAiAnalysis }) => {
+    const handleAiUpdated = (payload: {
+      evaluationId?: string;
+      answerBookId?: string;
+      questionNumber?: number;
+      aiStatus?: QuestionAiAnalysisStatus;
+      aiAnalysis?: QuestionMarkAiAnalysis;
+      aiError?: string;
+    }) => {
       if (payload && (payload.answerBookId === id || (evaluation && payload.evaluationId === evaluation._id))) {
-        if (payload.questionNumber && payload.aiAnalysis) {
+        if (payload.questionNumber) {
           const qNum = payload.questionNumber;
-          const ai = payload.aiAnalysis;
           setMarksState((prev) =>
-            prev.map((m) =>
-              m.questionNumber === qNum ? { ...m, aiAnalysis: ai } : m
-            )
+            prev.map((m) => {
+              if (m.questionNumber === qNum) {
+                return {
+                  ...m,
+                  aiStatus: payload.aiStatus || m.aiStatus,
+                  aiAnalysis: payload.aiAnalysis !== undefined ? payload.aiAnalysis : m.aiAnalysis,
+                  aiError: payload.aiError !== undefined ? payload.aiError : m.aiError,
+                };
+              }
+              return m;
+            })
           );
         }
+        queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      }
+    };
+
+    const handleJobStarted = (payload: {
+      evaluationId?: string;
+      answerBookId?: string;
+      job: FullAnalysisJob;
+    }) => {
+      if (payload.answerBookId === id || (evaluation && payload.evaluationId === evaluation._id)) {
+        setActiveJob(payload.job);
+        queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      }
+    };
+
+    const handleJobProgress = (payload: {
+      evaluationId?: string;
+      answerBookId?: string;
+      job: FullAnalysisJob;
+    }) => {
+      if (payload.answerBookId === id || (evaluation && payload.evaluationId === evaluation._id)) {
+        setActiveJob(payload.job);
+      }
+    };
+
+    const handleJobCompleted = (payload: {
+      evaluationId?: string;
+      answerBookId?: string;
+      job: FullAnalysisJob;
+    }) => {
+      if (payload.answerBookId === id || (evaluation && payload.evaluationId === evaluation._id)) {
+        setActiveJob(payload.job);
+        queryClient.invalidateQueries({ queryKey: ['paper', id] });
+      }
+    };
+
+    const handleMappingUpdated = (payload: { answerBookId?: string; mappings: QuestionPageMapping[] }) => {
+      if (payload.answerBookId === id) {
         queryClient.invalidateQueries({ queryKey: ['paper', id] });
       }
     };
@@ -104,12 +179,20 @@ export function EvaluationWorkspacePage() {
     socket.on('moderation.returned', handleUpdate);
     socket.on('moderation.approved', handleUpdate);
     socket.on('evaluation.ai.updated', handleAiUpdated);
+    socket.on('ai.full-analysis.started', handleJobStarted);
+    socket.on('ai.full-analysis.progress', handleJobProgress);
+    socket.on('ai.full-analysis.completed', handleJobCompleted);
+    socket.on('answerbook.mapping.updated', handleMappingUpdated);
 
     return () => {
       socket.off('answerbook.status.changed', handleUpdate);
       socket.off('moderation.returned', handleUpdate);
       socket.off('moderation.approved', handleUpdate);
       socket.off('evaluation.ai.updated', handleAiUpdated);
+      socket.off('ai.full-analysis.started', handleJobStarted);
+      socket.off('ai.full-analysis.progress', handleJobProgress);
+      socket.off('ai.full-analysis.completed', handleJobCompleted);
+      socket.off('answerbook.mapping.updated', handleMappingUpdated);
     };
   }, [id, evaluation?._id, queryClient]);
 
@@ -663,6 +746,90 @@ export function EvaluationWorkspacePage() {
     }
   };
 
+  // Mutation: Start Full Answer Book Analysis (Asynchronous)
+  const startFullAnalysisMutation = useMutation({
+    mutationFn: async () => {
+      if (!evaluation) throw new Error('No evaluation in progress');
+      const res = await apiClient.post(`/evaluations/${evaluation._id}/ai/full-analysis`);
+      return res.data;
+    },
+    onSuccess: (res) => {
+      if (res.data?.job) {
+        setActiveJob(res.data.job);
+      }
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.message || err.message || 'Failed to start full analysis');
+    },
+  });
+
+  // Mutation: Cancel Full Analysis
+  const cancelFullAnalysisMutation = useMutation({
+    mutationFn: async () => {
+      if (!evaluation) throw new Error('No evaluation in progress');
+      const res = await apiClient.post(`/evaluations/${evaluation._id}/ai/full-analysis/cancel`);
+      return res.data;
+    },
+    onSuccess: () => {
+      setActiveJob((prev) => (prev ? { ...prev, status: 'CANCELLED' } : null));
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.message || err.message || 'Failed to cancel analysis job');
+    },
+  });
+
+  // Mutation: Retry Single Question
+  const retryQuestionMutation = useMutation({
+    mutationFn: async (questionNumber: number) => {
+      if (!evaluation) throw new Error('No evaluation in progress');
+      const res = await apiClient.post(`/evaluations/${evaluation._id}/ai/questions/${questionNumber}/retry`);
+      return { questionNumber, data: res.data.data };
+    },
+    onSuccess: ({ questionNumber, data }) => {
+      setMarksState((prev) =>
+        prev.map((m) =>
+          m.questionNumber === questionNumber
+            ? { ...m, aiStatus: 'COMPLETED', aiAnalysis: data, aiError: undefined }
+            : m
+        )
+      );
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.message || err.message || 'Retry failed');
+    },
+  });
+
+  // Mutation: Accept AI Mapping
+  const acceptAiMappingMutation = useMutation({
+    mutationFn: async (questionNumber: number) => {
+      const res = await apiClient.post(`/answer-books/${id}/questions/${questionNumber}/accept-ai-mapping`);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.message || err.message || 'Failed to accept mapping');
+    },
+  });
+
+  // Mutation: Dismiss AI Mapping
+  const dismissAiMappingMutation = useMutation({
+    mutationFn: async (questionNumber: number) => {
+      const res = await apiClient.post(`/answer-books/${id}/questions/${questionNumber}/dismiss-ai-mapping`);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['paper', id] });
+    },
+    onError: (err: any) => {
+      alert(err.response?.data?.message || err.message || 'Failed to dismiss mapping');
+    },
+  });
+
   // Fetch page media from backend
   const { data: pagesList = [] } = useQuery<{ pageNumber: number; quality?: any; ocr?: any }[]>({
     queryKey: ['paper-pages-list', id],
@@ -818,6 +985,112 @@ export function EvaluationWorkspacePage() {
             )}
           </button>
 
+          {/* One-Click Full Answer Book AI Analysis Button / Status Bar */}
+          {(() => {
+            const isPaperVerified = questionPaper?.extractionStatus === 'VERIFIED';
+            const isJobRunning = activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED';
+            const isJobCompleted = activeJob?.status === 'COMPLETED';
+            const isJobPartial = activeJob?.status === 'COMPLETED_WITH_ERRORS';
+
+            if (isJobRunning) {
+              const jobProg = getJobProgress(activeJob);
+              return (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    background: '#0e1a2b',
+                    padding: '4px 12px',
+                    border: '1px solid var(--gold)',
+                    borderRadius: 2,
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gold)', fontWeight: 700 }}>
+                      AI ANALYSIS {activeJob?.status === 'QUEUED' ? 'QUEUED…' : 'PROCESSING…'}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#f8fafc', fontWeight: 600 }}>
+                      Questions: {jobProg.completedQuestions} / {jobProg.totalQuestions || activeQuestions.length} completed
+                      {jobProg.totalPages ? ` • Pages: ${jobProg.analyzedPages} / ${jobProg.totalPages} analyzed` : ''}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowProgressModal(true)}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      padding: '3px 8px',
+                      background: 'rgba(212, 175, 55, 0.2)',
+                      border: '1px solid var(--gold)',
+                      color: '#ffffff',
+                      cursor: 'pointer',
+                      fontWeight: 700,
+                    }}
+                  >
+                    View Progress
+                  </button>
+                </div>
+              );
+            }
+
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={!isPaperVerified || startFullAnalysisMutation.isPending}
+                  title={!isPaperVerified ? 'Verify the question paper before running full AI analysis.' : 'Start asynchronous full answer book analysis'}
+                  onClick={() => {
+                    if (isJobRunning) {
+                      setShowProgressModal(true);
+                    } else {
+                      startFullAnalysisMutation.mutate();
+                    }
+                  }}
+                  style={{
+                    background: isPaperVerified ? 'linear-gradient(135deg, #0e1a2b 0%, #1e3a5f 100%)' : 'rgba(0,0,0,0.04)',
+                    color: isPaperVerified ? '#ffffff' : 'var(--charcoal)',
+                    borderColor: isPaperVerified ? 'var(--gold)' : 'var(--border)',
+                    fontSize: 12,
+                    fontWeight: 700,
+                    padding: '6px 12px',
+                    cursor: !isPaperVerified ? 'not-allowed' : 'pointer',
+                    boxShadow: isPaperVerified ? '0 1px 4px rgba(0,0,0,0.15)' : 'none',
+                    opacity: !isPaperVerified ? 0.6 : 1,
+                  }}
+                >
+                  {startFullAnalysisMutation.isPending ? (
+                    '✦ Launching Full Analysis…'
+                  ) : isJobCompleted ? (
+                    '✦ RE-ANALYZE ENTIRE ANSWER BOOK'
+                  ) : (
+                    '✦ ANALYZE ENTIRE ANSWER BOOK'
+                  )}
+                </button>
+                {(isJobCompleted || isJobPartial) && (
+                  <button
+                    type="button"
+                    onClick={() => setShowProgressModal(true)}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      padding: '5px 8px',
+                      background: isJobPartial ? 'rgba(180, 83, 9, 0.1)' : 'rgba(21, 128, 61, 0.1)',
+                      border: `1px solid ${isJobPartial ? '#b45309' : '#15803d'}`,
+                      color: isJobPartial ? '#b45309' : '#15803d',
+                      cursor: 'pointer',
+                      fontWeight: 700,
+                    }}
+                  >
+                    {isJobPartial ? '⚠ AI Partial (View)' : '✓ AI Complete'}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+
           <div style={{ height: 20, width: 1, background: 'var(--border)' }} />
           <div style={{ fontSize: 14, color: 'var(--charcoal)' }}>
             Exam: <strong>{exam ? exam.title : 'Examination'}</strong> ({exam?.subjectCode})
@@ -964,6 +1237,73 @@ export function EvaluationWorkspacePage() {
                       <div style={{ fontSize: 12, opacity: isSelected ? 0.85 : 0.65 }}>
                         Max: {q.maximumMarks} Marks
                       </div>
+
+                      {/* Per-Question AI Analysis State */}
+                      {(() => {
+                        const aiStatus = item?.aiStatus || (item?.aiAnalysis ? 'COMPLETED' : 'NOT_STARTED');
+                        const aiSuggestion = item?.aiAnalysis;
+                        const suggestedMarks = aiSuggestion?.suggestedMarks;
+                        const confidence = aiSuggestion?.confidence;
+
+                        if (aiStatus === 'ANALYZING') {
+                          return (
+                            <div style={{ fontSize: 11, color: isSelected ? '#fbbf24' : '#b45309', fontWeight: 700, marginTop: 4 }}>
+                              ◉ AI analyzing…
+                            </div>
+                          );
+                        }
+                        if (aiStatus === 'QUEUED') {
+                          return (
+                            <div style={{ fontSize: 11, color: isSelected ? '#93c5fd' : '#0284c7', fontWeight: 600, marginTop: 4 }}>
+                              ◷ AI queued…
+                            </div>
+                          );
+                        }
+                        if (aiStatus === 'NEEDS_REVIEW') {
+                          return (
+                            <div style={{ fontSize: 11, color: isSelected ? '#fde047' : '#b45309', fontWeight: 700, marginTop: 4 }}>
+                              ⚠ Review required {confidence !== undefined ? `(${Math.round(confidence * 100)}%)` : ''}
+                            </div>
+                          );
+                        }
+                        if (aiStatus === 'FAILED') {
+                          return (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                              <span style={{ fontSize: 11, color: isSelected ? '#fca5a5' : '#b91c1c', fontWeight: 700 }}>
+                                ✕ AI failed
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  retryQuestionMutation.mutate(q.questionNumber);
+                                }}
+                                style={{
+                                  fontFamily: 'Cambria',
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  padding: '1px 6px',
+                                  background: isSelected ? 'rgba(255,255,255,0.2)' : 'rgba(185, 28, 28, 0.1)',
+                                  color: isSelected ? '#ffffff' : '#b91c1c',
+                                  border: '1px solid currentColor',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                [ Retry ]
+                              </button>
+                            </div>
+                          );
+                        }
+                        if (aiStatus === 'COMPLETED' && suggestedMarks !== undefined) {
+                          const isHighConf = confidence !== undefined ? confidence >= 0.8 : true;
+                          return (
+                            <div style={{ fontSize: 11, color: isSelected ? '#86efac' : '#15803d', fontWeight: 600, marginTop: 4 }}>
+                              ✓ AI {suggestedMarks}/{q.maximumMarks} {isHighConf ? '• High confidence' : `• Conf ${Math.round((confidence || 0) * 100)}%`}
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
                     </div>
 
                     <div>
@@ -1281,7 +1621,21 @@ export function EvaluationWorkspacePage() {
                       </button>
                     ))}
                     <span style={{ fontSize: 11, color: '#94a3b8', marginLeft: 4 }}>
-                      ({hasExplicitMapping ? `${mappedPages.length} ${mappedPages.length === 1 ? 'page' : 'pages'} for this answer` : `All ${totalPagesCount} pages available (unmapped)`})
+                      {hasExplicitMapping ? (
+                        <>
+                          ({mappedPages.length} {mappedPages.length === 1 ? 'page' : 'pages'} for this answer
+                          {mapping?.source === 'AI_SUGGESTED' || (mapping?.source as any) === 'AI'
+                            ? mapping?.confidence && mapping.confidence >= 0.75
+                              ? ' • AI mapped'
+                              : ' • AI suggested'
+                            : ''}
+                          )
+                        </>
+                      ) : (
+                        <span style={{ color: '#fbbf24', fontWeight: 600 }}>
+                          ⚠ Unresolved page mapping (Needs examiner review)
+                        </span>
+                      )}
                     </span>
                   </div>
                 );
@@ -1360,6 +1714,105 @@ export function EvaluationWorkspacePage() {
               )}
             </div>
           </div>
+
+          {/* Conflicting / Suggested AI Page Mapping Banner */}
+          {(() => {
+            const mapping = answerBook.questionPageMapping?.find(
+              (m) => m.questionNumber === activeQuestion.questionNumber
+            );
+            if (!mapping?.aiSuggestedPages || mapping.aiSuggestedPages.length === 0) return null;
+
+            return (
+              <div
+                style={{
+                  padding: '8px 16px',
+                  background: 'rgba(212, 175, 55, 0.14)',
+                  borderBottom: '1px solid var(--gold)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  fontSize: 12,
+                  color: '#ffffff',
+                }}
+              >
+                <div>
+                  <span style={{ color: 'var(--gold)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    ✦ AI PAGE MAPPING SUGGESTION:
+                  </span>{' '}
+                  <span>
+                    Q{activeQuestion.questionNumber} → pages{' '}
+                    <strong>{mapping.aiSuggestedPages.join(', ')}</strong>
+                  </span>
+                  {mapping.aiConfidence !== undefined && (
+                    <span style={{ color: '#cbd5e1', marginLeft: 8 }}>
+                      (Confidence: {mapping.aiConfidence.toFixed(2)})
+                    </span>
+                  )}
+                  {mapping.aiReason && (
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                      Evidence: {mapping.aiReason}
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => acceptAiMappingMutation.mutate(activeQuestion.questionNumber)}
+                    disabled={acceptAiMappingMutation.isPending}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '3px 8px',
+                      background: '#15803d',
+                      color: '#ffffff',
+                      border: '1px solid #16a34a',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    [ ACCEPT ]
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMappingInput(mapping.aiSuggestedPages!.join(', '));
+                      setIsEditingMapping(true);
+                    }}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '3px 8px',
+                      background: 'rgba(255,255,255,0.1)',
+                      color: '#ffffff',
+                      border: '1px solid rgba(255,255,255,0.3)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    [ EDIT ]
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => dismissAiMappingMutation.mutate(activeQuestion.questionNumber)}
+                    disabled={dismissAiMappingMutation.isPending}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '3px 8px',
+                      background: 'transparent',
+                      color: '#cbd5e1',
+                      border: '1px solid rgba(255,255,255,0.2)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    [ KEEP EXISTING MAPPING ]
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Viewer Canvas */}
           <div
@@ -1752,6 +2205,37 @@ export function EvaluationWorkspacePage() {
                     REPLACE
                   </button>
                 </div>
+
+                {/* Full Answer Book AI Analysis Action */}
+                <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--gold)' }}>
+                      FULL ANSWER BOOK AI
+                    </span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--navy)' }}>
+                      {activeJob?.status || 'NOT STARTED'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED' || startFullAnalysisMutation.isPending}
+                    onClick={() => {
+                      if (activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED') {
+                        setShowProgressModal(true);
+                      } else {
+                        startFullAnalysisMutation.mutate();
+                      }
+                    }}
+                    style={{ width: '100%', fontSize: 12, padding: '7px 12px', justifyContent: 'center' }}
+                  >
+                    {activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED'
+                      ? '✦ Analysis Running… View Progress'
+                      : startFullAnalysisMutation.isPending
+                      ? '✦ Launching Analysis…'
+                      : '✦ ANALYZE ENTIRE ANSWER BOOK'}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -2038,6 +2522,15 @@ export function EvaluationWorkspacePage() {
                       onClick={() => handleIgnoreSuggestion(activeQuestion.questionNumber)}
                     >
                       Ignore
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ fontSize: 12, padding: '5px 8px', gridColumn: 'span 2', justifyContent: 'center' }}
+                      title="Re-run AI suggestion for this question using current page mappings and verified rubric"
+                      onClick={() => handleRequestAi(true)}
+                    >
+                      ↻ Re-run AI Suggestion (Q{activeQuestion.questionNumber})
                     </button>
                   </div>
                 )}
@@ -2968,6 +3461,403 @@ export function EvaluationWorkspacePage() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================ */}
+      {/* FULL ANSWER BOOK AI ANALYSIS PROGRESS MODAL */}
+      {/* ============================================================ */}
+      {showProgressModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(14, 26, 43, 0.75)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1100,
+            padding: 24,
+          }}
+        >
+          <div
+            style={{
+              background: '#ffffff',
+              border: '2px solid var(--gold)',
+              maxWidth: 720,
+              width: '100%',
+              maxHeight: '90vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                padding: '16px 20px',
+                background: 'linear-gradient(135deg, var(--navy) 0%, #1e3a5f 100%)',
+                color: '#ffffff',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                borderBottom: '2px solid var(--gold)',
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.12em', color: 'var(--gold)', fontWeight: 700 }}>
+                  EVALNEXA BATCH EVALUATOR
+                </div>
+                <h3 style={{ fontSize: 20, fontWeight: 700, margin: '2px 0 0 0' }}>
+                  AI Full Script Analysis
+                </h3>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <span
+                  style={{
+                    padding: '3px 10px',
+                    fontSize: 12,
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    background:
+                      activeJob?.status === 'COMPLETED'
+                        ? 'rgba(21, 128, 61, 0.2)'
+                        : activeJob?.status === 'COMPLETED_WITH_ERRORS'
+                        ? 'rgba(180, 83, 9, 0.2)'
+                        : activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED'
+                        ? 'rgba(56, 189, 248, 0.2)'
+                        : 'rgba(255,255,255,0.1)',
+                    color:
+                      activeJob?.status === 'COMPLETED'
+                        ? '#86efac'
+                        : activeJob?.status === 'COMPLETED_WITH_ERRORS'
+                        ? '#fde047'
+                        : activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED'
+                        ? '#38bdf8'
+                        : '#ffffff',
+                    border: '1px solid currentColor',
+                  }}
+                >
+                  {activeJob?.status || 'NOT STARTED'}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowProgressModal(false)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#ffffff',
+                    fontSize: 22,
+                    cursor: 'pointer',
+                    lineHeight: 1,
+                  }}
+                  title="Close modal and continue working"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ padding: 20, overflowY: 'auto', flex: 1 }}>
+              {/* Progress Summary Cards */}
+              {(() => {
+                const jobProg = getJobProgress(activeJob);
+                const totalQ = jobProg.totalQuestions || activeQuestions.length || 1;
+                const completedQ = jobProg.completedQuestions || 0;
+                const percent = Math.min(100, Math.round((completedQ / totalQ) * 100));
+
+                return (
+                  <>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(3, 1fr)',
+                        gap: 12,
+                        marginBottom: 16,
+                      }}
+                    >
+                      <div style={{ background: '#f8fafc', border: '1px solid var(--border)', padding: '12px 14px' }}>
+                        <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--charcoal)', fontWeight: 600 }}>
+                          Questions
+                        </div>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--navy)', marginTop: 2 }}>
+                          {jobProg.completedQuestions} / {jobProg.totalQuestions || activeQuestions.length}
+                        </div>
+                        <div style={{ fontSize: 11, color: '#15803d', marginTop: 2 }}>
+                          Completed
+                        </div>
+                      </div>
+
+                      <div style={{ background: '#f8fafc', border: '1px solid var(--border)', padding: '12px 14px' }}>
+                        <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--charcoal)', fontWeight: 600 }}>
+                          Answer Pages
+                        </div>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--navy)', marginTop: 2 }}>
+                          {jobProg.analyzedPages || (activeJob?.status === 'COMPLETED' ? totalPagesCount : 0)} / {jobProg.totalPages || totalPagesCount}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--charcoal)', marginTop: 2 }}>
+                          Pages Analyzed
+                        </div>
+                      </div>
+
+                      <div style={{ background: '#f8fafc', border: '1px solid var(--border)', padding: '12px 14px' }}>
+                        <div style={{ fontSize: 11, textTransform: 'uppercase', color: 'var(--charcoal)', fontWeight: 600 }}>
+                          Current Action
+                        </div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--navy)', marginTop: 6, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {activeJob?.status === 'RUNNING'
+                            ? jobProg.currentQuestionNumber
+                              ? `Evaluating Q${jobProg.currentQuestionNumber}`
+                              : 'Processing scripts…'
+                            : activeJob?.status === 'QUEUED'
+                            ? 'Job Queued'
+                            : activeJob?.status === 'COMPLETED'
+                            ? 'All Completed'
+                            : activeJob?.status === 'COMPLETED_WITH_ERRORS'
+                            ? 'Completed with Errors'
+                            : 'Idle'}
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--charcoal)', marginTop: 2 }}>
+                          {jobProg.failedCount ? `${jobProg.failedCount} Failed` : 'Advisory only'}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Progress Bar */}
+                    <div style={{ marginBottom: 20 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 4, fontWeight: 600, color: 'var(--charcoal)' }}>
+                        <span>Analysis Progress</span>
+                        <span>{percent}%</span>
+                      </div>
+                      <div style={{ height: 8, background: '#e2e8f0', borderRadius: 4, overflow: 'hidden' }}>
+                        <div
+                          style={{
+                            height: '100%',
+                            width: `${percent}%`,
+                            background: 'linear-gradient(90deg, var(--gold) 0%, #15803d 100%)',
+                            transition: 'width 0.3s ease',
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Status Breakdown Pills */}
+                    <div style={{ display: 'flex', gap: 12, marginBottom: 16, fontSize: 12 }}>
+                      <span style={{ color: '#15803d', fontWeight: 600 }}>
+                        ✓ Available: {jobProg.completedQuestions}
+                      </span>
+                      <span style={{ color: '#b45309', fontWeight: 600 }}>
+                        ⚠ Needs Review: {jobProg.needsReviewCount}
+                      </span>
+                      <span style={{ color: '#b91c1c', fontWeight: 600 }}>
+                        ✕ Failed: {jobProg.failedCount}
+                      </span>
+                    </div>
+                  </>
+                );
+              })()}
+
+              {/* Question-by-Question List */}
+              <div style={{ border: '1px solid var(--border)' }}>
+                <div
+                  style={{
+                    padding: '8px 12px',
+                    background: '#f1f5f9',
+                    borderBottom: '1px solid var(--border)',
+                    fontSize: 11,
+                    fontWeight: 700,
+                    textTransform: 'uppercase',
+                    color: 'var(--charcoal)',
+                    letterSpacing: '0.06em',
+                    display: 'grid',
+                    gridTemplateColumns: '1.2fr 1fr 1.2fr 1fr',
+                  }}
+                >
+                  <span>Question</span>
+                  <span>AI Status</span>
+                  <span>Suggested Mark</span>
+                  <span style={{ textAlign: 'right' }}>Action</span>
+                </div>
+
+                <div style={{ maxHeight: 240, overflowY: 'auto' }}>
+                  {activeQuestions.map((q, idx) => {
+                    const itemMark = marksState.find((m) => m.questionNumber === q.questionNumber);
+                    const aiStatus = itemMark?.aiStatus || (itemMark?.aiAnalysis ? 'COMPLETED' : 'NOT_STARTED');
+                    const aiSuggestion = itemMark?.aiAnalysis;
+                    const suggestedMarks = aiSuggestion?.suggestedMarks;
+                    const confidence = aiSuggestion?.confidence;
+
+                    return (
+                      <div
+                        key={q.questionNumber}
+                        style={{
+                          padding: '10px 12px',
+                          borderBottom: '1px solid var(--border)',
+                          display: 'grid',
+                          gridTemplateColumns: '1.2fr 1fr 1.2fr 1fr',
+                          alignItems: 'center',
+                          fontSize: 13,
+                        }}
+                      >
+                        <div>
+                          <strong>Q{q.questionNumber}</strong>
+                          <span style={{ fontSize: 11, color: 'var(--charcoal)', marginLeft: 6 }}>
+                            ({q.maximumMarks}m)
+                          </span>
+                        </div>
+
+                        <div>
+                          {aiStatus === 'ANALYZING' && (
+                            <span style={{ color: '#b45309', fontWeight: 700, fontSize: 12 }}>
+                              ◉ Analyzing…
+                            </span>
+                          )}
+                          {aiStatus === 'QUEUED' && (
+                            <span style={{ color: '#0284c7', fontWeight: 600, fontSize: 12 }}>
+                              ◷ Queued
+                            </span>
+                          )}
+                          {aiStatus === 'COMPLETED' && (
+                            <span style={{ color: '#15803d', fontWeight: 700, fontSize: 12 }}>
+                              ✓ Completed
+                            </span>
+                          )}
+                          {aiStatus === 'NEEDS_REVIEW' && (
+                            <span style={{ color: '#b45309', fontWeight: 700, fontSize: 12 }}>
+                              ⚠ Review
+                            </span>
+                          )}
+                          {aiStatus === 'FAILED' && (
+                            <span style={{ color: '#b91c1c', fontWeight: 700, fontSize: 12 }}>
+                              ✕ Failed
+                            </span>
+                          )}
+                          {aiStatus === 'NOT_STARTED' && (
+                            <span style={{ color: 'var(--charcoal)', opacity: 0.6, fontSize: 12 }}>
+                              Pending
+                            </span>
+                          )}
+                        </div>
+
+                        <div>
+                          {suggestedMarks !== undefined ? (
+                            <span>
+                              <strong>{suggestedMarks}</strong> / {q.maximumMarks}{' '}
+                              <span style={{ fontSize: 11, color: 'var(--charcoal)' }}>
+                                ({Math.round((confidence || 0) * 100)}%)
+                              </span>
+                            </span>
+                          ) : itemMark?.aiError ? (
+                            <span style={{ fontSize: 11, color: '#b91c1c' }} title={itemMark.aiError}>
+                              {itemMark.aiError.slice(0, 24)}…
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: 12, color: 'var(--charcoal)', opacity: 0.6 }}>—</span>
+                          )}
+                        </div>
+
+                        <div style={{ textAlign: 'right', display: 'flex', justifyContent: 'flex-end', gap: 6 }}>
+                          {aiStatus === 'FAILED' && (
+                            <button
+                              type="button"
+                              onClick={() => retryQuestionMutation.mutate(q.questionNumber)}
+                              disabled={retryQuestionMutation.isPending}
+                              style={{
+                                fontFamily: 'Cambria',
+                                fontSize: 11,
+                                padding: '2px 6px',
+                                background: 'rgba(185, 28, 28, 0.1)',
+                                color: '#b91c1c',
+                                border: '1px solid #b91c1c',
+                                cursor: 'pointer',
+                                fontWeight: 700,
+                              }}
+                            >
+                              Retry
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setActiveQIndex(idx);
+                              setShowProgressModal(false);
+                            }}
+                            style={{
+                              fontFamily: 'Cambria',
+                              fontSize: 11,
+                              padding: '2px 8px',
+                              background: 'transparent',
+                              border: '1px solid var(--border)',
+                              color: 'var(--navy)',
+                              cursor: 'pointer',
+                            }}
+                          >
+                            Inspect
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Informational Advisory Note */}
+              <div style={{ marginTop: 16, padding: '10px 14px', background: 'rgba(14,26,43,0.04)', border: '1px solid var(--border)', fontSize: 12, color: 'var(--charcoal)', lineHeight: 1.4 }}>
+                <strong>Advisory Reminder:</strong> AI analysis generates suggested marks and page mappings for examiner consideration. Final marks remain under complete examiner authority and are never automatically applied.
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div
+              style={{
+                padding: '12px 20px',
+                borderTop: '1px solid var(--border)',
+                background: '#f8fafc',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <div>
+                {(activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED') && (
+                  <button
+                    type="button"
+                    onClick={() => cancelFullAnalysisMutation.mutate()}
+                    disabled={cancelFullAnalysisMutation.isPending}
+                    style={{
+                      fontFamily: 'Cambria',
+                      fontSize: 12,
+                      padding: '6px 12px',
+                      background: 'transparent',
+                      color: 'var(--burgundy)',
+                      border: '1px solid var(--burgundy)',
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {cancelFullAnalysisMutation.isPending ? 'Cancelling…' : 'Cancel Analysis'}
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => setShowProgressModal(false)}
+                  style={{ fontSize: 13, padding: '8px 18px' }}
+                >
+                  Continue Working in Marking Desk
+                </button>
+              </div>
             </div>
           </div>
         </div>

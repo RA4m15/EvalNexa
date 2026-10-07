@@ -147,6 +147,13 @@ export interface QuestionPageMapping {
   questionNumber: number;
   pages: number[];
   verified?: boolean;
+  confidence?: number;
+  reason?: string;
+  needsHumanReview?: boolean;
+  source?: 'AI_SUGGESTED' | 'EXAMINER_VERIFIED';
+  aiSuggestedPages?: number[];
+  aiConfidence?: number;
+  aiReason?: string;
 }
 
 // --- Evaluation Status ---
@@ -160,6 +167,41 @@ export type EvaluationStatus =
 
 // --- Question Marking Status ---
 export type QuestionMarkStatus = 'NOT_STARTED' | 'MARKED' | 'FLAGGED' | 'NOT_ATTEMPTED';
+
+// --- AI Analysis States ---
+export type QuestionAiAnalysisStatus =
+  | 'NOT_STARTED'
+  | 'QUEUED'
+  | 'ANALYZING'
+  | 'COMPLETED'
+  | 'NEEDS_REVIEW'
+  | 'FAILED';
+
+export type FullAnalysisJobStatus =
+  | 'NOT_STARTED'
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'COMPLETED_WITH_ERRORS'
+  | 'FAILED'
+  | 'CANCELLED';
+
+export interface FullAnalysisJob {
+  jobId: string;
+  status: FullAnalysisJobStatus;
+  questionPaperId?: string;
+  totalQuestions: number;
+  completedQuestions: number;
+  failedQuestions: number;
+  needsReviewQuestions: number;
+  totalPages: number;
+  analyzedPages: number;
+  currentStep?: string;
+  currentQuestionNumber?: number;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
 
 export interface QuestionMarkAiAnalysis {
   questionPaperId?: string;
@@ -185,6 +227,8 @@ export interface QuestionMarkItem {
   marks: number;
   status: QuestionMarkStatus;
   comment?: string;
+  aiStatus?: QuestionAiAnalysisStatus;
+  aiError?: string;
   aiAnalysis?: QuestionMarkAiAnalysis;
 }
 
@@ -197,6 +241,7 @@ export interface Evaluation {
   totalMarks?: number;
   remarks?: string;
   questionMarks?: QuestionMarkItem[];
+  fullAnalysisJob?: FullAnalysisJob;
   startedAt?: string;
   submittedAt?: string;
   createdAt: string;
@@ -443,6 +488,10 @@ export type SocketEvent =
   | 'evaluation.updated'
   | 'evaluation.submitted'
   | 'evaluation.ai.updated'
+  | 'ai.full-analysis.started'
+  | 'ai.full-analysis.progress'
+  | 'ai.full-analysis.completed'
+  | 'answerbook.mapping.updated'
   | 'moderation.approved'
   | 'moderation.returned'
   | 'result.finalized'

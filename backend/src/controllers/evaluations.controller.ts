@@ -136,3 +136,108 @@ export async function getAIEvaluationSuggestion(req: AuthRequest, res: Response)
     });
   }
 }
+
+export async function startFullAnalysisController(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, evaluationId } = req.params;
+    const targetEvaluationId = evaluationId || id;
+    const { forceRefresh } = req.body || {};
+
+    const { startFullAnswerBookAnalysis } = await import('../services/fullAnalysis.service');
+    const result = await startFullAnswerBookAnalysis(targetEvaluationId, {
+      userId: req.user!._id.toString(),
+      userRole: req.user!.role,
+      userName: req.user!.name,
+      forceRefresh: Boolean(forceRefresh),
+    });
+
+    res.status(202).json({
+      success: true,
+      message: result.message,
+      data: {
+        jobId: result.jobId,
+        status: result.status,
+        job: result.evaluation?.fullAnalysisJob,
+      },
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to start full answer book AI analysis',
+      code: error.code || 'FULL_ANALYSIS_ERROR',
+    });
+  }
+}
+
+export async function getFullAnalysisStatusController(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, evaluationId } = req.params;
+    const targetEvaluationId = evaluationId || id;
+
+    const { getFullAnalysisStatus } = await import('../services/fullAnalysis.service');
+    const data = await getFullAnalysisStatus(targetEvaluationId);
+    res.json({
+      success: true,
+      data,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to retrieve analysis status',
+      code: error.code || 'GET_STATUS_ERROR',
+    });
+  }
+}
+
+export async function cancelFullAnalysisController(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, evaluationId } = req.params;
+    const targetEvaluationId = evaluationId || id;
+
+    const { cancelFullAnalysis } = await import('../services/fullAnalysis.service');
+    const result = await cancelFullAnalysis(targetEvaluationId, {
+      userId: req.user!._id.toString(),
+      userRole: req.user!.role,
+    });
+    res.json({ success: true, message: result.message });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to cancel analysis job',
+    });
+  }
+}
+
+export async function retryQuestionAnalysisController(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, evaluationId, questionNumber } = req.params;
+    const targetEvaluationId = evaluationId || id;
+
+    const { retryQuestionAnalysis } = await import('../services/fullAnalysis.service');
+    const result = await retryQuestionAnalysis(
+      targetEvaluationId,
+      parseInt(questionNumber, 10),
+      {
+        userId: req.user!._id.toString(),
+        userRole: req.user!.role,
+        userName: req.user!.name,
+      }
+    );
+
+    res.json({
+      success: true,
+      message: `Retried AI evaluation for Question ${questionNumber}`,
+      data: result.data,
+    });
+  } catch (error: any) {
+    const status = error.status || 500;
+    res.status(status).json({
+      success: false,
+      message: error.message || 'Failed to retry question evaluation',
+      code: error.code || 'RETRY_ERROR',
+    });
+  }
+}
