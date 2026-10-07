@@ -1952,8 +1952,8 @@ export function EvaluationWorkspacePage() {
                       fontFamily: 'Cambria',
                       fontSize: 12,
                       padding: '2px 8px',
-                      background: '#ffffff',
-                      color: '#000000',
+                      background: 'var(--input-bg)',
+                      color: 'var(--ink)',
                       border: '1px solid var(--border)',
                       width: 110,
                     }}
@@ -2286,10 +2286,10 @@ export function EvaluationWorkspacePage() {
                       >
                         ✓ DIGITIZED SCRIPT
                       </span>
-                      <div style={{ fontSize: 12, color: '#1e293b' }}>
+                      <div style={{ fontSize: 12, color: 'var(--charcoal)' }}>
                         Docket: <strong>{answerBook.answerBookCode}</strong>
                       </div>
-                      <div style={{ fontSize: 11, color: '#64748b' }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                         Candidate: {answerBook.studentCode} · Page {currentPage} of {totalPagesCount}
                       </div>
                     </div>
@@ -2299,18 +2299,18 @@ export function EvaluationWorkspacePage() {
                   <div
                     style={{
                       marginLeft: 36,
-                      background: 'rgba(241, 245, 249, 0.85)',
-                      border: '1px solid rgba(203, 213, 225, 0.8)',
+                      background: 'var(--parchment-warm)',
+                      border: '1px solid var(--border)',
                       padding: '10px 16px',
                       marginBottom: 20,
                       lineHeight: 1.4,
                       borderRadius: 4,
                     }}
                   >
-                    <div style={{ fontSize: 12, fontWeight: 700, color: '#1e3a8a', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--navy)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 2 }}>
                       Question {activeQuestion?.questionNumber} · Maximum Marks: {activeQuestion?.maximumMarks}
                     </div>
-                    <div style={{ fontSize: 14, color: '#1e293b', fontStyle: 'italic' }}>
+                    <div style={{ fontSize: 14, color: 'var(--ink)', fontStyle: 'italic' }}>
                       "{activeQuestion?.text}"
                     </div>
                   </div>
@@ -2319,7 +2319,7 @@ export function EvaluationWorkspacePage() {
                   <div
                     style={{
                       marginLeft: 36,
-                      color: '#1e3a8a',
+                      color: 'var(--navy)',
                       fontSize: 16,
                       whiteSpace: 'pre-wrap',
                       lineHeight: '32px',
