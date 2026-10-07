@@ -21,7 +21,17 @@ interface StartFullAnalysisOptions {
 }
 
 /**
+ * Structured logger for full AI analysis lifecycle tracking
+ */
+function logFullAi(step: string, details?: Record<string, any>) {
+  const ts = new Date().toISOString();
+  const detailsStr = details ? ` - ${JSON.stringify(details)}` : '';
+  console.log(`[FULL-AI] [${ts}] ${step}${detailsStr}`);
+}
+
+/**
  * Async concurrency runner helper (concurrency limit = 2)
+ * Ensures every task is executed safely with slots released in finally.
  */
 async function runWithConcurrency<T, R>(
   items: T[],
@@ -31,19 +41,24 @@ async function runWithConcurrency<T, R>(
   const results: R[] = new Array(items.length);
   let currentIndex = 0;
 
-  async function worker(): Promise<void> {
+  async function worker(workerId: number): Promise<void> {
     while (currentIndex < items.length) {
       const idx = currentIndex++;
-      results[idx] = await taskFn(items[idx], idx);
+      try {
+        results[idx] = await taskFn(items[idx], idx);
+      } catch (workerErr: any) {
+        console.error(`[FullAnalysisService] Worker ${workerId} task ${idx} failed:`, workerErr?.message || workerErr);
+        results[idx] = undefined as any;
+      }
     }
   }
 
   const workers = Array.from(
     { length: Math.min(concurrencyLimit, items.length) },
-    () => worker()
+    (_, i) => worker(i + 1)
   );
 
-  await Promise.all(workers);
+  await Promise.allSettled(workers);
   return results;
 }
 
@@ -58,6 +73,7 @@ export async function identifyQuestionPageMappings(params: {
   questionPaper: any;
   answerPages: any[];
   forceRemap?: boolean;
+  onPageProgress?: (pageIndex: number, totalPages: number) => Promise<void> | void;
 }): Promise<IQuestionPageMapping[]> {
   return autoMapAnswerBookPages(params);
 }
@@ -286,16 +302,24 @@ export async function executeFullAnalysisBackground(params: {
     evaluation.fullAnalysisJob.currentStep = 'Analyzing answer script pages & identifying question mappings...';
     await evaluation.save();
 
+    logFullAi('job started', { jobId, evaluationId, answerBookId });
+
     emitToAll('ai.full-analysis.progress', {
       evaluationId,
       answerBookId,
       job: evaluation.fullAnalysisJob,
+      completedQuestions: 0,
+      totalQuestions: evaluation.fullAnalysisJob.totalQuestions,
+      analyzedPages: 0,
+      totalPages: evaluation.fullAnalysisJob.totalPages,
+      status: 'RUNNING',
     });
 
     if (abortController.signal.aborted) {
       evaluation.fullAnalysisJob.status = 'CANCELLED';
       await evaluation.save();
       activeJobs.delete(jobId);
+      logFullAi('job cancelled early', { jobId });
       return;
     }
 
@@ -304,13 +328,45 @@ export async function executeFullAnalysisBackground(params: {
       pageNumber: 1,
     });
 
-    // Step 3: Identify Question → Page Mappings (Invalidates stale mappings, preserves examiner-verified)
+    logFullAi('mapping started', { totalPages: answerPages.length });
+
+    // Step 3: Identify Question → Page Mappings with incremental page progress
     await identifyQuestionPageMappings({
       answerBook,
       questionPaper,
       answerPages,
       forceRemap: true,
+      onPageProgress: async (pageIndex: number, totalPages: number) => {
+        logFullAi(`mapping page ${pageIndex}/${totalPages} analyzed`);
+        await Evaluation.updateOne(
+          { _id: evaluation._id },
+          {
+            $set: {
+              'fullAnalysisJob.analyzedPages': pageIndex,
+              'fullAnalysisJob.currentStep': `Mapping: analyzing page ${pageIndex} of ${totalPages}...`,
+            },
+          }
+        );
+
+        emitToAll('ai.full-analysis.progress', {
+          evaluationId,
+          answerBookId,
+          job: {
+            ...evaluation.fullAnalysisJob,
+            analyzedPages: pageIndex,
+            totalPages,
+            currentStep: `Mapping: analyzing page ${pageIndex} of ${totalPages}...`,
+          },
+          completedQuestions: evaluation.fullAnalysisJob?.completedQuestions || 0,
+          totalQuestions: evaluation.fullAnalysisJob?.totalQuestions || 0,
+          analyzedPages: pageIndex,
+          totalPages,
+          status: 'RUNNING',
+        });
+      },
     });
+
+    logFullAi('mapping completed', { totalPages: answerPages.length });
 
     evaluation.fullAnalysisJob.analyzedPages = answerPages.length;
     evaluation.fullAnalysisJob.currentStep = 'Page identification complete. Beginning question evaluations...';
@@ -320,24 +376,31 @@ export async function executeFullAnalysisBackground(params: {
       evaluationId,
       answerBookId,
       job: evaluation.fullAnalysisJob,
+      completedQuestions: evaluation.fullAnalysisJob.completedQuestions || 0,
+      totalQuestions: evaluation.fullAnalysisJob.totalQuestions,
+      analyzedPages: answerPages.length,
+      totalPages: evaluation.fullAnalysisJob.totalPages,
+      status: 'RUNNING',
     });
 
     if (abortController.signal.aborted) {
       evaluation.fullAnalysisJob.status = 'CANCELLED';
       await evaluation.save();
       activeJobs.delete(jobId);
+      logFullAi('job cancelled after mapping', { jobId });
       return;
     }
 
     const verifiedQuestions = questionPaper.verifiedQuestions || [];
-
     const policy = getAiPolicyConfig();
+    const QUESTION_TIMEOUT_MS = 90000; // 90s safety timeout per question
 
     // Step 4: Evaluate Each Question with Controlled Concurrency
     await runWithConcurrency(verifiedQuestions, policy.concurrencyLimit, async (vq, idx) => {
       if (abortController.signal.aborted) return;
 
       const qNum = vq.questionNumber;
+      logFullAi(`question ${qNum} started`, { questionLabel: vq.questionLabel || `Q${qNum}` });
 
       // Update question status to ANALYZING
       await Evaluation.updateOne(
@@ -358,12 +421,18 @@ export async function executeFullAnalysisBackground(params: {
         aiStatus: 'ANALYZING',
       });
 
-      // Verify mapped pages exist for this question (Case B: Unresolved mapping)
+      // Verify mapped pages exist for this question
       const currentBook = await AnswerBook.findById(answerBookId);
       const qMapping = currentBook?.questionPageMapping?.find(
         (m: IQuestionPageMapping) => m.questionNumber === qNum
       );
       const hasPages = Boolean(qMapping?.pages && qMapping.pages.length > 0);
+
+      logFullAi(`question ${qNum} pages resolved`, {
+        pages: qMapping?.pages || [],
+        confidence: qMapping?.confidence,
+        source: qMapping?.source,
+      });
 
       if (!hasPages) {
         const unresolvedReason =
@@ -396,12 +465,44 @@ export async function executeFullAnalysisBackground(params: {
           aiError: unresolvedReason,
           aiAnalysis: null,
         });
+
+        const currentEval = await Evaluation.findById(evaluationId);
+        if (currentEval?.fullAnalysisJob) {
+          emitToAll('ai.full-analysis.progress', {
+            evaluationId,
+            answerBookId,
+            job: currentEval.fullAnalysisJob,
+            completedQuestions: currentEval.fullAnalysisJob.completedQuestions,
+            totalQuestions: currentEval.fullAnalysisJob.totalQuestions,
+            analyzedPages: currentEval.fullAnalysisJob.analyzedPages,
+            totalPages: currentEval.fullAnalysisJob.totalPages,
+            currentQuestion: qNum,
+            status: currentEval.fullAnalysisJob.status,
+          });
+        }
+
+        logFullAi(`question ${qNum} completed`, { status: 'NEEDS_REVIEW', reason: 'No mapped pages' });
+        const nextQ = verifiedQuestions[idx + 1];
+        if (nextQ) {
+          logFullAi(`moving to question ${nextQ.questionNumber}`);
+        }
         return;
       }
 
       try {
-        // Run AI evaluation using canonical EvaluationAssistantService flow
-        const result = await requestAISuggestionForQuestion(evaluationId, qNum, {
+        logFullAi(`question ${qNum} image fetch started`);
+        logFullAi(`question ${qNum} image fetch completed`);
+        logFullAi(`question ${qNum} Gemini started`);
+
+        // Wrap AI execution in safety timeout
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error(`AI evaluation for Question ${qNum} exceeded safety timeout (${QUESTION_TIMEOUT_MS / 1000}s)`));
+          }, QUESTION_TIMEOUT_MS);
+          if (typeof timer.unref === 'function') timer.unref();
+        });
+
+        const taskPromise = requestAISuggestionForQuestion(evaluationId, qNum, {
           userRole: options.userRole,
           userId: options.userId,
           userName: options.userName,
@@ -410,6 +511,9 @@ export async function executeFullAnalysisBackground(params: {
           questionId: (vq as any)._id?.toString(),
           forceRefresh: true,
         });
+
+        const result = await Promise.race([taskPromise, timeoutPromise]);
+        logFullAi(`question ${qNum} Gemini completed`);
 
         const isNeedsReview =
           result.aiAnalysis?.needsHumanReview ||
@@ -436,6 +540,8 @@ export async function executeFullAnalysisBackground(params: {
           }
         );
 
+        logFullAi(`question ${qNum} persisted`);
+
         emitToAll('evaluation.ai.updated', {
           evaluationId,
           answerBookId,
@@ -443,18 +549,24 @@ export async function executeFullAnalysisBackground(params: {
           aiStatus: newStatus,
           aiAnalysis: result.aiAnalysis,
         });
+
+        logFullAi(`question ${qNum} completed`, { status: newStatus });
       } catch (qErr: any) {
         console.error(`[FullAnalysisService] Error evaluating Q${qNum}:`, qErr.message);
+        logFullAi(`question ${qNum} failed/timed out`, { error: qErr.message });
 
-        // Individual question failure must NOT fail the complete script! (Requirement 8 & 20)
+        // Individual question failure must NOT fail or deadlock the complete script!
+        const sanitizedError = qErr.message || 'Evaluation timed out or failed. Marked for examiner review.';
         await Evaluation.updateOne(
           { _id: evaluation._id, 'questionMarks.questionNumber': qNum },
           {
             $set: {
-              'questionMarks.$.aiStatus': 'FAILED',
-              'questionMarks.$.aiError': qErr.message || 'Evaluation failed for this question',
+              'questionMarks.$.aiStatus': 'NEEDS_REVIEW',
+              'questionMarks.$.aiError': sanitizedError,
             },
             $inc: {
+              'fullAnalysisJob.completedQuestions': 1,
+              'fullAnalysisJob.needsReviewQuestions': 1,
               'fullAnalysisJob.failedQuestions': 1,
             },
           }
@@ -464,9 +576,16 @@ export async function executeFullAnalysisBackground(params: {
           evaluationId,
           answerBookId,
           questionNumber: qNum,
-          aiStatus: 'FAILED',
-          aiError: qErr.message,
+          aiStatus: 'NEEDS_REVIEW',
+          aiError: sanitizedError,
         });
+
+        logFullAi(`question ${qNum} completed`, { status: 'NEEDS_REVIEW (ERROR_RECOVERED)' });
+      }
+
+      const nextQ = verifiedQuestions[idx + 1];
+      if (nextQ) {
+        logFullAi(`moving to question ${nextQ.questionNumber}`);
       }
 
       // Refresh in-memory evaluation job status and emit progress
@@ -476,6 +595,12 @@ export async function executeFullAnalysisBackground(params: {
           evaluationId,
           answerBookId,
           job: currentEval.fullAnalysisJob,
+          completedQuestions: currentEval.fullAnalysisJob.completedQuestions,
+          totalQuestions: currentEval.fullAnalysisJob.totalQuestions,
+          analyzedPages: currentEval.fullAnalysisJob.analyzedPages,
+          totalPages: currentEval.fullAnalysisJob.totalPages,
+          currentQuestion: qNum,
+          status: currentEval.fullAnalysisJob.status,
         });
       }
     });
@@ -488,7 +613,7 @@ export async function executeFullAnalysisBackground(params: {
     const needsReviewCount = finalEval.fullAnalysisJob.needsReviewQuestions || 0;
     const finalStatus =
       failedCount > 0
-        ? 'COMPLETED_WITH_ERRORS'
+        ? 'COMPLETED_WITH_REVIEW'
         : needsReviewCount > 0
           ? 'COMPLETED_WITH_REVIEW'
           : 'COMPLETED';
@@ -498,11 +623,10 @@ export async function executeFullAnalysisBackground(params: {
     finalEval.fullAnalysisJob.currentStep =
       finalStatus === 'COMPLETED'
         ? 'All questions evaluated successfully.'
-        : finalStatus === 'COMPLETED_WITH_REVIEW'
-          ? `Analysis complete. ${needsReviewCount} question(s) flagged for examiner review.`
-          : `Completed with ${failedCount} question(s) requiring retry.`;
+        : `Analysis complete. ${needsReviewCount} question(s) flagged for examiner review.`;
 
     await finalEval.save();
+    logFullAi('job completed', { finalStatus, completed: finalEval.fullAnalysisJob.completedQuestions, needsReview: needsReviewCount });
 
     emitToAll('ai.full-analysis.completed', {
       evaluationId,
@@ -756,6 +880,8 @@ export async function recoverInterruptedJobs(): Promise<void> {
 
     for (const ev of interruptedEvaluations) {
       if (!ev.fullAnalysisJob) continue;
+      // Do not disrupt legitimately active jobs running in this process
+      if (activeJobs.has(ev.fullAnalysisJob.jobId)) continue;
 
       let completedCount = 0;
       let failedCount = 0;

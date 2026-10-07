@@ -473,7 +473,14 @@ Return valid JSON with this exact structure:
 
         for (const m of candidateModels) {
           try {
-            const response = await client.models.generateContent({
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              const timer = setTimeout(() => {
+                reject(new Error(`Gemini multimodal inspection for model '${m}' timed out after 30s`));
+              }, 30000);
+              if (typeof timer.unref === 'function') timer.unref();
+            });
+
+            const generatePromise = client.models.generateContent({
               model: m,
               contents,
               config: {
@@ -482,6 +489,7 @@ Return valid JSON with this exact structure:
               },
             });
 
+            const response = await Promise.race([generatePromise, timeoutPromise]);
             const raw = response.text || '';
             if (raw) {
               const parsed = JSON.parse(raw);
@@ -524,8 +532,9 @@ export async function autoMapAnswerBookPages(params: {
   questionPaper: any;
   answerPages?: any[];
   forceRemap?: boolean;
+  onPageProgress?: (pageIndex: number, totalPages: number) => Promise<void> | void;
 }): Promise<IQuestionPageMapping[]> {
-  const { answerBook, questionPaper, forceRemap } = params;
+  const { answerBook, questionPaper, forceRemap, onPageProgress } = params;
 
   // 1. Resolve verified questions
   const questions =
@@ -581,16 +590,24 @@ export async function autoMapAnswerBookPages(params: {
   const pageToQuestions = new Map<number, number[]>();
 
   // PHASE 1: Explicit Header Matching & Semantic Content Matching per Page
+  let pageIdx = 0;
   for (const page of pages) {
+    pageIdx++;
     const pageNum = page.pageNumber;
     const pageText = page.ocr?.text || '';
 
     emitToAll('answerbook.mapping.progress', {
       answerBookId: answerBook._id.toString(),
-      analyzedPages: pageNum,
+      analyzedPages: pageIdx,
       totalPages: pages.length,
       currentStep: `Analyzing Page ${pageNum} content and concepts...`,
     });
+
+    if (onPageProgress) {
+      try {
+        await onPageProgress(pageIdx, pages.length);
+      } catch {}
+    }
 
     for (const prof of profiles) {
       const qNum = prof.questionNumber;

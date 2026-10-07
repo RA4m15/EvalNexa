@@ -544,7 +544,14 @@ export class EvaluationAssistantService {
 
       for (const m of candidateModels) {
         try {
-          const response = await client.models.generateContent({
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Gemini evaluation request for model '${m}' timed out after 60s`));
+            }, 60000);
+            if (typeof timer.unref === 'function') timer.unref();
+          });
+
+          const generatePromise = client.models.generateContent({
             model: m,
             contents,
             config: {
@@ -552,6 +559,8 @@ export class EvaluationAssistantService {
               temperature: 0.1, // Low temperature for deterministic evaluation
             },
           });
+
+          const response = await Promise.race([generatePromise, timeoutPromise]);
           responseText = response.text || '';
           usedModel = m;
           lastError = null;

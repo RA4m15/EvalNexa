@@ -76,6 +76,9 @@ export function EvaluationWorkspacePage() {
     setAiError(null);
   }, [activeQIndex]);
 
+  // AI Full Analysis active state check for fallback polling
+  const isJobRunning = activeJob?.status === 'RUNNING' || activeJob?.status === 'QUEUED';
+
   // Load AnswerBook & Evaluation
   const { data, isLoading, isError, refetch } = useQuery<WorkspaceData>({
     queryKey: ['paper', id],
@@ -84,6 +87,7 @@ export function EvaluationWorkspacePage() {
       return res.data.data;
     },
     enabled: Boolean(id),
+    refetchInterval: isJobRunning ? 2500 : false,
   });
 
   const answerBook = data?.answerBook;
