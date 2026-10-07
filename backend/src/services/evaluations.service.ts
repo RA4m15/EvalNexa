@@ -1072,6 +1072,9 @@ Question Source : ${questionSource}\n`);
   let ocrConfidenceCount = 0;
 
   for (const p of answerPages) {
+    let imageLoaded = false;
+    let imageBufferLength = 0;
+
     // 1. Try reading real high-res page directly from local uploads/ folder if available
     const pageFileName = `page-${String(p.pageNumber).padStart(4, '0')}.jpg`;
     const localFilePath = path.join(
@@ -1083,18 +1086,19 @@ Question Source : ${questionSource}\n`);
       pageFileName
     );
 
-    let imageLoaded = false;
     if (fs.existsSync(localFilePath)) {
       try {
         const fileBuffer = fs.readFileSync(localFilePath);
         studentImages.push(fileBuffer);
         imageLoaded = true;
+        imageBufferLength = fileBuffer.length;
       } catch {
         // Fall back to Cloudinary URL below
       }
     }
 
     // 2. If not read from disk, use secure Cloudinary URL
+    let resolvedUrl = p.cloudinary?.secureUrl || (p as any).imageUrl;
     if (!imageLoaded && p.cloudinary?.publicId) {
       try {
         const signed = generateAuthorizedMediaUrl(p.cloudinary.publicId, {
@@ -1104,6 +1108,7 @@ Question Source : ${questionSource}\n`);
           expiresInSeconds: 3600,
         });
         if (signed?.secureUrl) {
+          resolvedUrl = signed.secureUrl;
           studentImages.push(signed.secureUrl);
           imageLoaded = true;
         }
@@ -1113,11 +1118,13 @@ Question Source : ${questionSource}\n`);
     }
 
     // 3. Fallback to existing imageUrl or cloudinary.secureUrl (zero filesystem dependency)
-    const fallbackUrl = p.cloudinary?.secureUrl || (p as any).imageUrl;
-    if (!imageLoaded && fallbackUrl) {
-      studentImages.push(fallbackUrl);
+    if (!imageLoaded && resolvedUrl) {
+      studentImages.push(resolvedUrl);
       imageLoaded = true;
     }
+
+    // Structured logging for media verification
+    console.log(`[FULL-AI] [PAGE-MEDIA] pageNumber=${p.pageNumber}, cloudinaryPublicId=${p.cloudinary?.publicId || 'none'}, resourceType=${p.cloudinary?.resourceType || 'image'}, secureUrl=${resolvedUrl ? 'available' : 'none'}, imageBufferLength=${imageBufferLength}`);
 
     if (p.ocr?.text && p.ocr.text.trim().length > 0) {
       ocrParts.push(`--- Page ${p.pageNumber} ---\n${p.ocr.text}`);
