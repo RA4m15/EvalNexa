@@ -41,6 +41,7 @@ export function EvaluationWorkspacePage() {
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [saveStatus, setSaveStatus] = useState<'IDLE' | 'SAVING' | 'SAVED' | 'ERROR'>('IDLE');
+  const [saveErrorMessage, setSaveErrorMessage] = useState('');
 
   // Question Paper Modal State
   const [showQuestionPaperModal, setShowQuestionPaperModal] = useState(false);
@@ -641,6 +642,7 @@ export function EvaluationWorkspacePage() {
     mutationFn: async (updatedList: QuestionMarkItem[]) => {
       if (!evaluation) return;
       setSaveStatus('SAVING');
+      setSaveErrorMessage('');
       const total = updatedList
         .filter((q) => q.status === 'MARKED' || q.status === 'FLAGGED')
         .reduce((sum, q) => sum + (Number(q.marks) || 0), 0);
@@ -653,11 +655,14 @@ export function EvaluationWorkspacePage() {
     },
     onSuccess: () => {
       setSaveStatus('SAVED');
+      setSaveErrorMessage('');
       queryClient.invalidateQueries({ queryKey: ['paper', id] });
       setTimeout(() => setSaveStatus('IDLE'), 2500);
     },
-    onError: () => {
+    onError: (err: any) => {
       setSaveStatus('ERROR');
+      const msg = err.response?.data?.message || err.message || 'Save failed';
+      setSaveErrorMessage(msg);
     },
   });
 
@@ -2891,7 +2896,9 @@ export function EvaluationWorkspacePage() {
                   <span style={{ color: '#15803d', fontWeight: 600 }}>✓ Saved just now</span>
                 )}
                 {saveStatus === 'ERROR' && (
-                  <span style={{ color: 'var(--burgundy)', fontWeight: 600 }}>⚠ Save failed — Retry</span>
+                  <span style={{ color: 'var(--burgundy)', fontWeight: 600 }}>
+                    ⚠ {saveErrorMessage ? `Save failed: ${saveErrorMessage}` : 'Save failed — Retry'}
+                  </span>
                 )}
               </div>
 
