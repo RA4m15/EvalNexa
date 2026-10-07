@@ -517,6 +517,106 @@ export async function updateQuestionPageMapping(req: AuthRequest, res: Response)
 export const updateQuestionMapping = updateQuestionPageMapping;
 
 /**
+ * Accepts an AI-suggested page mapping for a specific question
+ */
+export async function acceptAiPageMapping(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, questionNumber } = req.params;
+    const answerBook = await AnswerBook.findById(id);
+    if (!answerBook) {
+      res.status(404).json({ success: false, message: 'Answer book not found' });
+      return;
+    }
+
+    if (req.user?.role === 'EXAMINER') {
+      const assignedExaminerId = answerBook.assignedExaminerId;
+      if (!assignedExaminerId || !areEntityIdsEqual(assignedExaminerId, req.user._id)) {
+        res.status(403).json({
+          success: false,
+          message: 'Access denied: You are not assigned to this answer book',
+          code: 'ACCESS_DENIED',
+        });
+        return;
+      }
+    }
+
+    const qNum = parseInt(questionNumber, 10);
+    const m = answerBook.questionPageMapping?.find((x: IQuestionPageMapping) => x.questionNumber === qNum);
+    if (!m) {
+      res.status(404).json({ success: false, message: 'Mapping not found for this question' });
+      return;
+    }
+
+    if (m.aiSuggestedPages && m.aiSuggestedPages.length > 0) {
+      m.pages = m.aiSuggestedPages;
+      m.confidence = m.aiConfidence || 1.0;
+      m.reason = m.aiReason || 'Examiner accepted AI page mapping';
+      m.verified = true;
+      m.source = 'EXAMINER_VERIFIED';
+      m.aiSuggestedPages = undefined;
+      m.aiConfidence = undefined;
+      m.aiReason = undefined;
+      m.needsHumanReview = false;
+      await answerBook.save();
+    }
+
+    res.json({
+      success: true,
+      message: `Accepted AI mapping for Question ${questionNumber}`,
+      data: answerBook.questionPageMapping,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+/**
+ * Dismisses an AI-suggested page mapping, keeping the existing manual mapping
+ */
+export async function dismissAiPageMapping(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id, questionNumber } = req.params;
+    const answerBook = await AnswerBook.findById(id);
+    if (!answerBook) {
+      res.status(404).json({ success: false, message: 'Answer book not found' });
+      return;
+    }
+
+    if (req.user?.role === 'EXAMINER') {
+      const assignedExaminerId = answerBook.assignedExaminerId;
+      if (!assignedExaminerId || !areEntityIdsEqual(assignedExaminerId, req.user._id)) {
+        res.status(403).json({
+          success: false,
+          message: 'Access denied: You are not assigned to this answer book',
+          code: 'ACCESS_DENIED',
+        });
+        return;
+      }
+    }
+
+    const qNum = parseInt(questionNumber, 10);
+    const m = answerBook.questionPageMapping?.find((x: IQuestionPageMapping) => x.questionNumber === qNum);
+    if (m) {
+      m.aiSuggestedPages = undefined;
+      m.aiConfidence = undefined;
+      m.aiReason = undefined;
+      m.verified = true;
+      m.source = 'EXAMINER_VERIFIED';
+      m.needsHumanReview = false;
+      await answerBook.save();
+    }
+
+    res.json({
+      success: true,
+      message: `Kept existing mapping for Question ${questionNumber}`,
+      data: answerBook.questionPageMapping,
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+}
+
+/**
  * Replaces an existing page's media safely (Admin only)
  */
 export async function replaceAnswerBookPage(req: AuthRequest, res: Response): Promise<void> {

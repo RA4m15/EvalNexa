@@ -59,6 +59,13 @@ export interface IQuestionPageMapping {
   questionNumber: number;
   pages: number[];
   verified?: boolean;
+  confidence?: number;
+  reason?: string;
+  needsHumanReview?: boolean;
+  source?: 'AI_SUGGESTED' | 'EXAMINER_VERIFIED';
+  aiSuggestedPages?: number[];
+  aiConfidence?: number;
+  aiReason?: string;
 }
 
 export interface IAnswerBook extends Document {
@@ -179,6 +186,17 @@ const AnswerBookSchema = new Schema<IAnswerBook>(
         questionNumber: { type: Number, required: true },
         pages: [{ type: Number, required: true }],
         verified: { type: Boolean, default: false },
+        confidence: { type: Number },
+        reason: { type: String, trim: true },
+        needsHumanReview: { type: Boolean, default: false },
+        source: {
+          type: String,
+          enum: ['AI_SUGGESTED', 'EXAMINER_VERIFIED'],
+          default: 'AI_SUGGESTED',
+        },
+        aiSuggestedPages: [{ type: Number }],
+        aiConfidence: { type: Number },
+        aiReason: { type: String, trim: true },
       },
     ],
   },

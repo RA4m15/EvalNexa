@@ -4,9 +4,11 @@ import { config } from './config';
 import { connectDatabase } from './config/database';
 import { initializeSocket } from './sockets';
 import { EvaluationAssistantService } from './services/EvaluationAssistantService';
+import { recoverInterruptedJobs } from './services/fullAnalysis.service';
 
 async function main() {
   await connectDatabase();
+  await recoverInterruptedJobs();
 
   const httpServer = http.createServer(app);
   initializeSocket(httpServer);
