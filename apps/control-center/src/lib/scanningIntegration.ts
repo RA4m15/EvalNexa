@@ -17,6 +17,10 @@ export interface PageQualityDiagnostics {
   cropReady?: boolean;
   ocrReadiness?: 'READY' | 'UNCLEAR' | 'FAILED';
   reason?: string;
+  outputWidth?: number;
+  outputHeight?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
 }
 
 export interface ProcessPageResult {
@@ -27,6 +31,31 @@ export interface ProcessPageResult {
   processedBlob?: Blob;
   ocrText?: string;
   errorMessage?: string;
+  outputWidth?: number;
+  outputHeight?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  cropReady?: boolean;
+}
+
+/**
+ * Synchronously converts a Base64 Data URI directly into a binary Blob
+ * without relying on fetch(dataUri), which is prone to CSP blocks or URL limits.
+ */
+export function dataUriToBlob(dataUri: string): Blob {
+  const parts = dataUri.split(',');
+  if (parts.length < 2) {
+    throw new Error('Invalid Data URI format');
+  }
+  const mimeMatch = parts[0].match(/:(.*?);/);
+  const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+  const byteString = atob(parts[1]);
+  const arrayBuffer = new ArrayBuffer(byteString.length);
+  const uint8Array = new Uint8Array(arrayBuffer);
+  for (let i = 0; i < byteString.length; i++) {
+    uint8Array[i] = byteString.charCodeAt(i);
+  }
+  return new Blob([uint8Array], { type: mime });
 }
 
 const DEFAULT_SCANNING_SERVICE_URL =
@@ -57,6 +86,52 @@ export async function checkScanningServiceHealth(
   }
 }
 
+export interface LiveDocumentDetection {
+  detected: boolean;
+  corners: [number, number][] | null;
+  documentScore: number;
+  imageWidth?: number;
+  imageHeight?: number;
+  reason?: string;
+}
+
+/**
+ * Lightweight real-time document detector called at 5-10 FPS during camera preview.
+ * Returns 4 corners and detection state without expensive OCR or full quality matrix.
+ */
+export async function detectDocumentPreview(
+  frameBlob: Blob,
+  signal?: AbortSignal,
+  serviceUrl = DEFAULT_SCANNING_SERVICE_URL
+): Promise<LiveDocumentDetection> {
+  try {
+    const formData = new FormData();
+    formData.append('file', frameBlob, 'preview_frame.jpg');
+
+    const res = await fetch(`${serviceUrl}/detect-document`, {
+      method: 'POST',
+      body: formData,
+      signal,
+    }).catch(() => null);
+
+    if (!res || !res.ok) {
+      return { detected: false, corners: null, documentScore: 0 };
+    }
+
+    const data = await res.json();
+    return {
+      detected: Boolean(data.detected),
+      corners: Array.isArray(data.corners) ? data.corners : null,
+      documentScore: typeof data.document_score === 'number' ? data.document_score : 0,
+      imageWidth: data.image_width,
+      imageHeight: data.image_height,
+      reason: data.reason,
+    };
+  } catch {
+    return { detected: false, corners: null, documentScore: 0 };
+  }
+}
+
 /**
  * Sends a captured frame to the OpenCV scanning service for real page detection,
  * perspective correction, and blur/sharpness verification.
@@ -68,6 +143,12 @@ export async function processPageWithOpenCVService(
     answerBookCode: string;
     pageNumber: number;
     filename?: string;
+    corners?: [number, number][];
+    originalCorners?: [number, number][];
+    previewWidth?: number;
+    previewHeight?: number;
+    captureWidth?: number;
+    captureHeight?: number;
   },
   serviceUrl = DEFAULT_SCANNING_SERVICE_URL
 ): Promise<ProcessPageResult> {
@@ -77,6 +158,24 @@ export async function processPageWithOpenCVService(
     formData.append('examId', meta.examId);
     formData.append('answerBookCode', meta.answerBookCode);
     formData.append('pageNumber', String(meta.pageNumber));
+    if (meta.corners && meta.corners.length === 4) {
+      formData.append('corners', JSON.stringify(meta.corners));
+    }
+    if (meta.originalCorners && meta.originalCorners.length === 4) {
+      formData.append('original_corners', JSON.stringify(meta.originalCorners));
+    }
+    if (typeof meta.previewWidth === 'number') {
+      formData.append('previewWidth', String(meta.previewWidth));
+    }
+    if (typeof meta.previewHeight === 'number') {
+      formData.append('previewHeight', String(meta.previewHeight));
+    }
+    if (typeof meta.captureWidth === 'number') {
+      formData.append('captureWidth', String(meta.captureWidth));
+    }
+    if (typeof meta.captureHeight === 'number') {
+      formData.append('captureHeight', String(meta.captureHeight));
+    }
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -113,12 +212,18 @@ export async function processPageWithOpenCVService(
       data.processedImageUrl.startsWith('data:image/jpeg;base64,')
     ) {
       try {
-        const imageRes = await fetch(data.processedImageUrl);
-        processedBlob = await imageRes.blob();
-      } catch {
+        processedBlob = dataUriToBlob(data.processedImageUrl);
+      } catch (decodeErr) {
+        console.warn('Failed to convert processedImageUrl to Blob:', decodeErr);
         processedBlob = undefined;
       }
     }
+
+    const outputWidth = typeof data.output_width === 'number' ? data.output_width : undefined;
+    const outputHeight = typeof data.output_height === 'number' ? data.output_height : undefined;
+    const sourceWidth = typeof data.source_width === 'number' ? data.source_width : undefined;
+    const sourceHeight = typeof data.source_height === 'number' ? data.source_height : undefined;
+    const cropReady = data.cropReady !== undefined ? Boolean(data.cropReady) : true;
 
     return {
       success: true,
@@ -134,13 +239,22 @@ export async function processPageWithOpenCVService(
         sharpnessScore: typeof data.sharpness === 'number' ? data.sharpness : undefined,
         orientation: data.orientation || 'NORMAL',
         pageDetected: data.pageDetected !== undefined ? Boolean(data.pageDetected) : true,
-        cropReady: data.cropReady !== undefined ? Boolean(data.cropReady) : true,
+        cropReady,
         ocrReadiness: data.ocrReadiness || (data.qualityStatus === 'PASSED' ? 'READY' : 'UNCLEAR'),
         reason: data.reason,
+        outputWidth,
+        outputHeight,
+        sourceWidth,
+        sourceHeight,
       },
       processedImageUrl: data.processedImageUrl,
       processedBlob,
       ocrText: data.ocrText,
+      outputWidth,
+      outputHeight,
+      sourceWidth,
+      sourceHeight,
+      cropReady,
     };
   } catch (err: any) {
     return {
