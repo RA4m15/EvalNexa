@@ -70,6 +70,7 @@ export interface IEvaluation extends Document {
   examinerId: mongoose.Types.ObjectId;
   status: EvaluationStatus;
   totalMarks?: number;
+  totalPossibleMarks?: number;
   remarks?: string;
   questionMarks: IEvaluationQuestionMark[];
   fullAnalysisJob?: IFullAnalysisJob;
@@ -104,6 +105,7 @@ const EvaluationSchema = new Schema<IEvaluation>(
       default: 'NOT_STARTED',
     },
     totalMarks: { type: Number, min: 0, default: 0 },
+    totalPossibleMarks: { type: Number, min: 0 },
     remarks: { type: String, trim: true },
     fullAnalysisJob: {
       type: new Schema(
