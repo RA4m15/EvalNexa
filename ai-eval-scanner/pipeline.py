@@ -87,6 +87,12 @@ def process_image(
     page_number: int = 1,
     exam_id: Optional[str] = None,
     answer_book_code: Optional[str] = None,
+    corners_hint: Optional[List[List[float]]] = None,
+    original_corners: Optional[List[List[float]]] = None,
+    preview_width: Optional[int] = None,
+    preview_height: Optional[int] = None,
+    capture_width: Optional[int] = None,
+    capture_height: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Executes the full end-to-end AI-EVAL scanning pipeline.
@@ -101,11 +107,18 @@ def process_image(
         "ocrReadiness": "READY" | "UNCLEAR" | "FAILED",
         "reason": Optional[str],
         "processedImageUrl": Optional[str],
-        "ocrText": str
+        "ocrText": str,
+        "output_width": int,
+        "output_height": int,
+        "source_width": int,
+        "source_height": int,
+        "detected": bool,
+        "corners": Optional[List[List[float]]],
     }
     """
     t_start = time.perf_counter()
     temp_file = None
+    w_img, h_img = 0, 0
 
     try:
         # 1. Resolve image to a file path for Phase 2/3 intake
@@ -116,6 +129,7 @@ def process_image(
             img_test = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img_test is None:
                 raise ValueError("Could not decode image from provided byte stream (corrupt or unsupported format)")
+            h_img, w_img = img_test.shape[:2]
 
             fd, temp_file = tempfile.mkstemp(suffix=".jpg", prefix="evalnexa_scan_")
             os.close(fd)
@@ -127,8 +141,12 @@ def process_image(
             if not os.path.exists(image_input):
                 raise FileNotFoundError(f"Image file not found at: {image_input}")
             input_path = image_input
+            test_read = cv2.imread(image_input)
+            if test_read is not None:
+                h_img, w_img = test_read.shape[:2]
 
         elif isinstance(image_input, np.ndarray):
+            h_img, w_img = image_input.shape[:2]
             fd, temp_file = tempfile.mkstemp(suffix=".jpg", prefix="evalnexa_scan_")
             os.close(fd)
             cv2.imwrite(temp_file, image_input)
@@ -141,7 +159,40 @@ def process_image(
         # STEP 1: Scanner Intake (Phase 2 Detection + Phase 3 Rectification)
         # -------------------------------------------------------------------
         try:
-            p3_res = integrate_production_scanner(input_path)
+            scanner_opts = {
+                "corners_hint": corners_hint,
+                "original_corners": original_corners,
+                "preview_width": preview_width,
+                "preview_height": preview_height,
+                "capture_width": capture_width,
+                "capture_height": capture_height,
+            }
+            p3_res = integrate_production_scanner(input_path, options=scanner_opts)
+
+            if p3_res.status == "REJECTED_NON_DOCUMENT":
+                reason = " ".join([n for n in (p3_res.processing_notes or []) if "Non-document" in n or "rejected" in n]) or "Non-document surface detected. Please place the answer sheet flat inside the camera frame."
+                return {
+                    "qualityStatus": "RESCAN_REQUIRED",
+                    "blurDetected": False,
+                    "sharpness": 0.0,
+                    "sharpness_raw": 0.0,
+                    "sharpness_score": 0.0,
+                    "document_score": 0.0,
+                    "detected": False,
+                    "corners": None,
+                    "warped_image": None,
+                    "orientation": "NORMAL",
+                    "pageDetected": False,
+                    "cropReady": False,
+                    "ocrReadiness": "FAILED",
+                    "reason": reason,
+                    "processedImageUrl": None,
+                    "ocrText": "",
+                    "output_width": 0,
+                    "output_height": 0,
+                    "source_width": int(w_img),
+                    "source_height": int(h_img),
+                }
 
             # Document / page validity gate (Step 2A): prevent unresolvable/non-document inputs from reaching Phase 5
             if p3_res.status == "AMBIGUOUS_UNWARPED":
@@ -167,10 +218,18 @@ def process_image(
                             b64_str = base64.b64encode(encoded_buf.tobytes()).decode("ascii")
                             preview_url = f"data:image/jpeg;base64,{b64_str}"
 
+                    out_w = int(img_bgr.shape[1]) if p3_res.scanned_image is not None else 0
+                    out_h = int(img_bgr.shape[0]) if p3_res.scanned_image is not None else 0
                     return {
                         "qualityStatus": "HUMAN_REVIEW",
                         "blurDetected": blur_flagged,
                         "sharpness": sharpness_score,
+                        "sharpness_raw": lap_var,
+                        "sharpness_score": sharpness_score,
+                        "document_score": sharpness_score,
+                        "detected": True,
+                        "corners": p3_res.source_corners.tolist() if getattr(p3_res, "source_corners", None) is not None else None,
+                        "warped_image": preview_url,
                         "orientation": "NORMAL",
                         "pageDetected": False,
                         "cropReady": False,
@@ -178,12 +237,22 @@ def process_image(
                         "reason": "Document detected, but page boundaries could not be reliably resolved. Human verification required.",
                         "processedImageUrl": preview_url,
                         "ocrText": "",
+                        "output_width": out_w,
+                        "output_height": out_h,
+                        "source_width": int(w_img),
+                        "source_height": int(h_img),
                     }
                 else:
                     return {
                         "qualityStatus": "RESCAN_REQUIRED",
                         "blurDetected": False,
                         "sharpness": 0.0,
+                        "sharpness_raw": 0.0,
+                        "sharpness_score": 0.0,
+                        "document_score": 0.0,
+                        "detected": False,
+                        "corners": None,
+                        "warped_image": None,
                         "orientation": "NORMAL",
                         "pageDetected": False,
                         "cropReady": False,
@@ -191,6 +260,10 @@ def process_image(
                         "reason": "No document detected. Please ensure the answer sheet is clearly visible within the camera viewfinder.",
                         "processedImageUrl": None,
                         "ocrText": "",
+                        "output_width": 0,
+                        "output_height": 0,
+                        "source_width": int(w_img),
+                        "source_height": int(h_img),
                     }
 
             rectified_bgr = p3_res.scanned_image
@@ -207,6 +280,12 @@ def process_image(
                 "qualityStatus": "RESCAN_REQUIRED",
                 "blurDetected": True,
                 "sharpness": 0.0,
+                "sharpness_raw": 0.0,
+                "sharpness_score": 0.0,
+                "document_score": 0.0,
+                "detected": False,
+                "corners": None,
+                "warped_image": None,
                 "orientation": "NORMAL",
                 "pageDetected": False,
                 "cropReady": False,
@@ -214,6 +293,10 @@ def process_image(
                 "reason": "Unable to detect page boundaries. Please place the answer sheet flat within the camera frame.",
                 "processedImageUrl": None,
                 "ocrText": "",
+                "output_width": 0,
+                "output_height": 0,
+                "source_width": int(w_img),
+                "source_height": int(h_img),
             }
 
         # -------------------------------------------------------------------
@@ -244,23 +327,14 @@ def process_image(
         )
 
         # -------------------------------------------------------------------
-        # STEP 4: Rescan Decision Engine (Phase 7)
+        # -------------------------------------------------------------------
+        # STEP 4: Rescan Decision Engine (Phase 7) & Usability Arbitration
         # -------------------------------------------------------------------
         p7_res = evaluate_rescan_decision(
             document_input=p6_res.final_safe_state,
             final_quality_assessment=p6_res.quality_assessment_final,
             image_name=document_id,
         )
-
-        if p7_res.decision == "CONTINUE":
-            quality_status = "PASSED"
-            reason = None
-        elif p7_res.decision == "HUMAN_REVIEW":
-            quality_status = "HUMAN_REVIEW"
-            reason = p7_res.actionable_operator_guidance or f"Defect flagged: {p7_res.primary_trigger}"
-        else:
-            quality_status = "RESCAN_REQUIRED"
-            reason = p7_res.actionable_operator_guidance or f"Defect flagged: {p7_res.primary_trigger}"
 
         # -------------------------------------------------------------------
         # STEP 5: OCR Readiness & Representations (Phase 8)
@@ -298,11 +372,52 @@ def process_image(
             if isinstance(ready_bgr, np.ndarray) and ready_bgr.size > 0:
                 color_candidate = ready_bgr
 
+        if color_candidate is None and p6_res is not None and hasattr(p6_res, "final_safe_state") and p6_res.final_safe_state is not None:
+            raw_bgr = getattr(p6_res.final_safe_state, "raw_rectified_bgr", None)
+            if isinstance(raw_bgr, np.ndarray) and raw_bgr.size > 0:
+                color_candidate = raw_bgr
+            else:
+                image_bgr = getattr(p6_res.final_safe_state, "image_bgr", None)
+                if isinstance(image_bgr, np.ndarray) and image_bgr.size > 0:
+                    color_candidate = image_bgr
+
         if color_candidate is None:
-            if p6_res is not None and hasattr(p6_res, "final_safe_state") and p6_res.final_safe_state is not None:
-                raw_bgr = getattr(p6_res.final_safe_state, "raw_rectified_bgr", None)
-                if isinstance(raw_bgr, np.ndarray) and raw_bgr.size > 0:
-                    color_candidate = raw_bgr
+            color_candidate = rectified_bgr
+
+        # -------------------------------------------------------------------
+        # HACKATHON USABILITY RULE:
+        # A) Severely blurred & unreadable -> RESCAN_REQUIRED
+        # B) Slightly imperfect but text readable -> light enhance -> ACCEPT (PASSED)
+        # -------------------------------------------------------------------
+        is_severely_blurred = laplacian_var < 35.0 or (sharpness_score < 40.0 and is_blur_fatal)
+        is_severe_truncation = any(
+            d.defect_code in ("FATAL_TEXT_CLIPPED", "SEVERE_TEXT_CLIPPING", "FATAL_BOUNDARY_CLIPPING")
+            for d in getattr(p5_res, "fatal_defects", [])
+        )
+
+        if is_severely_blurred:
+            quality_status = "RESCAN_REQUIRED"
+            reason = "Document image is severely blurred and unreadable. Please hold steady and recapture."
+            blur_detected = True
+        elif is_severe_truncation:
+            quality_status = "RESCAN_REQUIRED"
+            reason = "Position page fully inside camera viewfinder to prevent boundary clipping."
+        elif not crop_ready or not page_detected:
+            quality_status = "RESCAN_REQUIRED"
+            reason = "No valid document detected. Please place the answer sheet flat inside the camera viewfinder."
+        else:
+            # Usable document with readable text: apply light enhancement if slightly blurry or low-contrast
+            if laplacian_var < 85.0 or sharpness_score < 70.0:
+                try:
+                    if color_candidate is not None and color_candidate.size > 0:
+                        blurred_ref = cv2.GaussianBlur(color_candidate, (0, 0), 1.5)
+                        color_candidate = cv2.addWeighted(color_candidate, 1.25, blurred_ref, -0.25, 0)
+                except Exception:
+                    pass
+
+            quality_status = "PASSED"
+            reason = None
+            blur_detected = False
 
         if color_candidate is not None:
             encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
@@ -311,10 +426,25 @@ def process_image(
                 b64_str = base64.b64encode(encoded_buf.tobytes()).decode("ascii")
                 processed_image_url = f"data:image/jpeg;base64,{b64_str}"
 
+        corners_list = (
+            p3_res.source_corners.tolist()
+            if getattr(p3_res, "source_corners", None) is not None
+            else None
+        )
+
+        out_w = int(color_candidate.shape[1]) if color_candidate is not None else 0
+        out_h = int(color_candidate.shape[0]) if color_candidate is not None else 0
+
         return {
             "qualityStatus": quality_status,
             "blurDetected": blur_detected,
             "sharpness": sharpness_score,
+            "sharpness_raw": laplacian_var,
+            "sharpness_score": sharpness_score,
+            "document_score": sharpness_score if quality_status == "PASSED" else 0.0,
+            "detected": page_detected,
+            "corners": corners_list,
+            "warped_image": processed_image_url,
             "orientation": orientation_str,
             "pageDetected": page_detected,
             "cropReady": crop_ready,
@@ -322,6 +452,10 @@ def process_image(
             "reason": reason,
             "processedImageUrl": processed_image_url,
             "ocrText": "",
+            "output_width": out_w,
+            "output_height": out_h,
+            "source_width": int(w_img),
+            "source_height": int(h_img),
         }
 
     finally:
