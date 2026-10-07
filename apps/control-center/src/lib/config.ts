@@ -15,9 +15,12 @@ function validateBackendOrigin(url: string | undefined, varName: string): string
     );
   }
 
-  if (value.includes('localhost:5000') || value.includes('127.0.0.1:5000')) {
+  if (
+    !import.meta.env.DEV &&
+    (value.includes('localhost:5000') || value.includes('127.0.0.1:5000'))
+  ) {
     throw new Error(
-      `[EvalNexa Configuration Error] ${varName} cannot point to localhost:5000. All panels must connect to ${LIVE_BACKEND_URL}`
+      `[EvalNexa Configuration Error] ${varName} cannot point to localhost:5000 in production.`
     );
   }
 

@@ -19,7 +19,7 @@ export const aiAssistantLimiter = rateLimit({
   legacyHeaders: false,
   validate: { keyGeneratorIpFallback: false },
   keyGenerator: (req: any) => {
-    return req.user?._id?.toString() || ipKeyGenerator(req.ip || '127.0.0.1');
+    return req.user?._id?.toString() || ipKeyGenerator(req.ip);
   },
   message: {
     success: false,
