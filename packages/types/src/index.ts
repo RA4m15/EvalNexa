@@ -147,8 +147,10 @@ export interface QuestionPageMapping {
   questionNumber: number;
   questionLabel?: string;
   pages: number[];
+  mappedPages?: number[];
   verified?: boolean;
   confidence?: number;
+  mappingConfidence?: number;
   reason?: string;
   evidence?: string[];
   needsHumanReview?: boolean;
@@ -162,6 +164,7 @@ export interface QuestionPageMapping {
   mappingSource?: string;
   examinerVerified?: boolean;
   isContinuation?: boolean;
+  mappingAlgorithmVersion?: string;
   aiSuggestedPages?: number[];
   aiConfidence?: number;
   aiReason?: string;

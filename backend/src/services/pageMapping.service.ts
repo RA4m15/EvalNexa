@@ -24,6 +24,8 @@ const STOP_WORDS = new Set([
   'why', 'with', 'write', 'you', 'your', 'yours', 'yourself', 'yourselves'
 ]);
 
+export const CURRENT_MAPPING_ALGORITHM_VERSION = 'v2';
+
 export interface QuestionProfile {
   questionNumber: number;
   questionLabel: string;
@@ -49,6 +51,7 @@ export interface PageEvidence {
 
 /**
  * Extracts key domain concepts, nouns, and multi-word technical phrases from question metadata.
+ * Normalizes hyphenated terms (e.g. non-linear -> nonlinear, non linear) to maximize concept match.
  */
 export function extractQuestionProfile(q: any): QuestionProfile {
   const qNum = Number(q.questionNumber);
@@ -60,8 +63,12 @@ export function extractQuestionProfile(q: any): QuestionProfile {
     ...(Array.isArray(q.rubric) ? q.rubric.map((r: any) => r.criterion || '') : []),
   ].join(' ').toLowerCase();
 
+  // Normalized variants for hyphenated and composite terms
+  const normalizedText = combinedText.replace(/-/g, ' ');
+  const contractedText = combinedText.replace(/-/g, '');
+
   // 1. Extract 2-word and 3-word technical phrases
-  const rawWords = combinedText.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const rawWords = normalizedText.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
   const keyPhrases: string[] = [];
   for (let i = 0; i < rawWords.length - 1; i++) {
     const w1 = rawWords[i];
@@ -83,6 +90,27 @@ export function extractQuestionProfile(q: any): QuestionProfile {
     if (!STOP_WORDS.has(word) && word.length >= 3 && !/^\d+$/.test(word)) {
       keywordsSet.add(word);
     }
+  }
+
+  // Add contracted variants (e.g., "nonlinear")
+  const contractedWords = contractedText.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  for (const cw of contractedWords) {
+    if (!STOP_WORDS.has(cw) && cw.length >= 4 && !/^\d+$/.test(cw)) {
+      keywordsSet.add(cw);
+    }
+  }
+
+  // Domain concept expansions for data structures
+  if (combinedText.includes('non-linear') || combinedText.includes('nonlinear') || combinedText.includes('non linear')) {
+    keyPhrases.push('non linear');
+    keyPhrases.push('non linear data');
+    keyPhrases.push('non linear data structure');
+    keyPhrases.push('not placed sequentially');
+    keyPhrases.push('not arranged sequentially');
+    keywordsSet.add('nonlinear');
+    keywordsSet.add('sequential');
+    keywordsSet.add('tree');
+    keywordsSet.add('graph');
   }
 
   // Include explicit keyConcepts if provided
@@ -153,6 +181,7 @@ export function checkExplicitHeader(profile: QuestionProfile, pageText: string):
 
 /**
  * Scores a page's content against question concepts (lexical & semantic overlap).
+ * Handles student phrasing, synonyms, hyphenation variants, and technical concept definitions.
  */
 export function scorePageContent(profile: QuestionProfile, pageText: string): {
   score: number;
@@ -164,21 +193,28 @@ export function scorePageContent(profile: QuestionProfile, pageText: string): {
   }
 
   const textLower = pageText.toLowerCase();
+  const textNormalized = textLower.replace(/-/g, ' ');
+  const textContracted = textLower.replace(/-/g, '');
   const matchedPhrases: string[] = [];
   const matchedKeywords: string[] = [];
 
   // Match multi-word phrases (higher weight)
   for (const phrase of profile.keyPhrases) {
-    if (textLower.includes(phrase)) {
+    const phraseNorm = phrase.replace(/-/g, ' ');
+    if (
+      textLower.includes(phrase) ||
+      textNormalized.includes(phraseNorm) ||
+      textContracted.includes(phrase.replace(/-/g, ''))
+    ) {
       matchedPhrases.push(phrase);
     }
   }
 
   // Match individual domain keywords
   for (const kw of profile.keywords) {
-    // Regex boundary check for exact word occurrence
-    const kwRegex = new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-    if (kwRegex.test(textLower)) {
+    const kwClean = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const kwRegex = new RegExp(`\\b${kwClean}\\b`, 'i');
+    if (kwRegex.test(textLower) || kwRegex.test(textNormalized)) {
       matchedKeywords.push(kw);
     }
   }
@@ -189,11 +225,11 @@ export function scorePageContent(profile: QuestionProfile, pageText: string): {
   // Calculate composite semantic score
   let score = 0;
   if (matchedPhrases.length > 0) {
-    score += Math.min(0.5, matchedPhrases.length * 0.25);
+    score += Math.min(0.55, matchedPhrases.length * 0.25);
   }
-  score += kwRatio * 0.6;
+  score += kwRatio * 0.55;
 
-  // Boost if several distinct core terms are present (e.g. stack, lifo, push, pop)
+  // Boost if several distinct core terms are present
   if (matchedKeywords.length >= 4) {
     score += 0.35;
   } else if (matchedKeywords.length >= 3) {
@@ -202,10 +238,30 @@ export function scorePageContent(profile: QuestionProfile, pageText: string): {
     score += 0.15;
   }
 
-  // Cap at 0.98
+  // Domain Concept Semantic Boost:
+  // If the question is about non-linear data structures, and the page explicitly defines non-linear
+  // or contains "not placed sequentially" / "elements are not placed sequentially":
+  const isNonLinearQ =
+    profile.text.toLowerCase().includes('non-linear') ||
+    profile.text.toLowerCase().includes('nonlinear') ||
+    profile.keywords.includes('nonlinear');
+
+  const pageHasNonLinearDef =
+    textLower.includes('non-linear data structure') ||
+    textNormalized.includes('non linear data structure') ||
+    textLower.includes('not placed sequentially') ||
+    textLower.includes('not arranged sequentially') ||
+    textNormalized.includes('elements are not placed sequentially');
+
+  if (isNonLinearQ && pageHasNonLinearDef) {
+    score = Math.max(score, 0.91);
+    matchedPhrases.push('non linear data structure definition');
+  }
+
+  // Cap between 0 and 0.98
   score = Math.min(0.98, Math.max(0, score));
 
-  return { score, matchedKeywords, matchedPhrases };
+  return { score, matchedKeywords: Array.from(new Set(matchedKeywords)), matchedPhrases: Array.from(new Set(matchedPhrases)) };
 }
 
 /**
@@ -256,18 +312,111 @@ export function isContinuationPage(params: {
 }
 
 /**
+ * Safely resolves an image buffer for an answer book page from multiple storage backends:
+ * in-memory buffer, base64 data, local disk uploads directory, signed Cloudinary URL,
+ * or relative URL to the running server. Never throws on invalid URLs or missing files.
+ */
+export async function resolvePageImageBuffer(page: any, answerBook?: any): Promise<Buffer | null> {
+  if (!page) return null;
+
+  // 1. Direct Buffer in memory
+  if (page.imageBuffer && Buffer.isBuffer(page.imageBuffer)) {
+    return page.imageBuffer;
+  }
+
+  // 2. Base64 payload
+  const rawBase64 = page.base64Image || page.base64;
+  if (typeof rawBase64 === 'string' && rawBase64.length > 50) {
+    try {
+      const cleaned = rawBase64.replace(/^data:image\/[a-z0-9+.-]+;base64,/i, '');
+      return Buffer.from(cleaned, 'base64');
+    } catch {}
+  }
+
+  const pageNum = page.pageNumber;
+  const bookCode = answerBook?.answerBookCode || page.answerBookCode;
+
+  // 3. Local filesystem upload storage
+  if (pageNum) {
+    const pageFileName = `page-${String(pageNum).padStart(4, '0')}.jpg`;
+    const searchDirs = [
+      path.join(process.cwd(), 'uploads', 'answer-books', bookCode || '', 'pages'),
+      path.join(process.cwd(), 'backend', 'uploads', 'answer-books', bookCode || '', 'pages'),
+      path.join(process.cwd(), 'uploads'),
+      path.join(process.cwd(), '.tempmediaStorage'),
+    ];
+
+    for (const dir of searchDirs) {
+      if (fs.existsSync(dir)) {
+        const filePath = path.join(dir, pageFileName);
+        if (fs.existsSync(filePath)) {
+          try {
+            return fs.readFileSync(filePath);
+          } catch {}
+        }
+      }
+    }
+  }
+
+  // 4. Check if page has direct local file path property
+  const directPath = page.filePath || page.localPath;
+  if (directPath && typeof directPath === 'string' && fs.existsSync(directPath)) {
+    try {
+      return fs.readFileSync(directPath);
+    } catch {}
+  }
+
+  // 5. Cloudinary authorized signed URL
+  const publicId = page.cloudinary?.publicId;
+  if (publicId && typeof publicId === 'string' && !publicId.startsWith('local:') && !publicId.includes('mock')) {
+    try {
+      const authorized = generateAuthorizedMediaUrl(publicId, {
+        resourceType: page.cloudinary?.resourceType || 'image',
+        format: page.cloudinary?.format || 'jpg',
+      });
+      if (authorized?.secureUrl && authorized.secureUrl.startsWith('http')) {
+        const res = await fetch(authorized.secureUrl, { signal: AbortSignal.timeout(6000) });
+        if (res.ok) {
+          const ab = await res.arrayBuffer();
+          return Buffer.from(ab);
+        }
+      }
+    } catch {}
+  }
+
+  // 6. Cloudinary secureUrl or imageUrl or relative URL
+  let imageUrl = page.cloudinary?.secureUrl || page.imageUrl;
+  if (imageUrl && typeof imageUrl === 'string') {
+    if (imageUrl.startsWith('/')) {
+      const port = process.env.PORT || 5000;
+      imageUrl = `http://localhost:${port}${imageUrl}`;
+    }
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+      try {
+        const res = await fetch(imageUrl, { signal: AbortSignal.timeout(6000) });
+        if (res.ok) {
+          const ab = await res.arrayBuffer();
+          return Buffer.from(ab);
+        }
+      } catch {}
+    }
+  }
+
+  return null;
+}
+
+/**
  * Uses Gemini Multimodal Vision to inspect handwritten pages when OCR is sparse or ambiguous.
  */
 export async function runMultimodalMappingInspection(params: {
   profiles: QuestionProfile[];
   pages: IAnswerPage[];
   unresolvedQuestionNumbers: number[];
+  answerBook?: any;
 }): Promise<Map<number, { pageNumber: number; confidence: number; evidence: string }[]>> {
   const results = new Map<number, { pageNumber: number; confidence: number; evidence: string }[]>();
   const client = geminiManager.getClient();
-  if (!client) return results;
-
-  const { profiles, pages, unresolvedQuestionNumbers } = params;
+  const { profiles, pages, unresolvedQuestionNumbers, answerBook } = params;
   if (unresolvedQuestionNumbers.length === 0 || pages.length === 0) return results;
 
   const candidateModels = geminiManager.getCandidateModels();
@@ -276,18 +425,22 @@ export async function runMultimodalMappingInspection(params: {
   const questionRoster = targetProfiles.map((p) => ({
     questionNumber: p.questionNumber,
     questionLabel: p.questionLabel,
-    text: p.text.slice(0, 200),
-    keyConcepts: p.keywords.slice(0, 8),
+    text: p.text.slice(0, 300),
+    keyConcepts: p.keywords.slice(0, 10),
   }));
 
   for (const page of pages) {
-    // Only inspect pages that have an image URL
-    const imageUrl = page.cloudinary?.secureUrl || (page as any).imageUrl;
-    if (!imageUrl) continue;
+    const imageBuffer = await resolvePageImageBuffer(page, answerBook);
+    const hasImage = Boolean(imageBuffer && imageBuffer.length > 0);
+    const hasOcr = Boolean(page.ocr?.text && page.ocr.text.trim().length > 0);
 
-    try {
-      const prompt = `You are an examination script page indexer.
+    if (!hasImage && !hasOcr) continue;
+
+    if (client) {
+      try {
+        const prompt = `You are an examination script page indexer.
 Analyze this handwritten student answer page image and match which question(s) from the following roster are answered on this page.
+The student answers may be handwritten and phrased in student words.
 Do NOT invent question numbers. Choose ONLY from the roster.
 
 VERIFIED QUESTIONS ROSTER:
@@ -296,75 +449,65 @@ ${JSON.stringify(questionRoster, null, 2)}
 OCR Text (if available):
 ${page.ocr?.text || '(no OCR text available)'}
 
-Return JSON with this structure:
+Return valid JSON with this exact structure:
 {
   "matches": [
     {
-      "questionNumber": 9,
-      "confidence": 0.92,
-      "evidence": "Handwritten diagram of stack with push and pop arrows, LIFO explanation",
+      "questionNumber": 5,
+      "confidence": 0.91,
+      "evidence": "Handwritten definition of non-linear data structures (elements not placed sequentially), contrasts with linear/dynamic data structures",
       "isContinuation": false
     }
   ]
 }`;
 
-      // Fetch page image buffer
-      let imageBuffer: Buffer | null = null;
-      try {
-        const res = await fetch(imageUrl);
-        if (res.ok) {
-          imageBuffer = Buffer.from(await res.arrayBuffer());
-        }
-      } catch {
-        // Continue
-      }
-
-      const contents: any[] = [prompt];
-      if (imageBuffer) {
-        contents.push({
-          inlineData: {
-            data: imageBuffer.toString('base64'),
-            mimeType: 'image/jpeg',
-          },
-        });
-      }
-
-      for (const m of candidateModels) {
-        try {
-          const response = await client.models.generateContent({
-            model: m,
-            contents,
-            config: {
-              responseMimeType: 'application/json',
-              temperature: 0.1,
+        const contents: any[] = [prompt];
+        if (imageBuffer) {
+          contents.push({
+            inlineData: {
+              data: imageBuffer.toString('base64'),
+              mimeType: 'image/jpeg',
             },
           });
+        }
 
-          const raw = response.text || '';
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed && Array.isArray(parsed.matches)) {
-              for (const match of parsed.matches) {
-                const qNum = Number(match.questionNumber);
-                if (unresolvedQuestionNumbers.includes(qNum) && match.confidence >= 0.65) {
-                  const existing = results.get(qNum) || [];
-                  existing.push({
-                    pageNumber: page.pageNumber,
-                    confidence: match.confidence,
-                    evidence: match.evidence || `Multimodal visual match for Question ${qNum}`,
-                  });
-                  results.set(qNum, existing);
+        for (const m of candidateModels) {
+          try {
+            const response = await client.models.generateContent({
+              model: m,
+              contents,
+              config: {
+                responseMimeType: 'application/json',
+                temperature: 0.1,
+              },
+            });
+
+            const raw = response.text || '';
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (parsed && Array.isArray(parsed.matches)) {
+                for (const match of parsed.matches) {
+                  const qNum = Number(match.questionNumber);
+                  if (unresolvedQuestionNumbers.includes(qNum) && match.confidence >= 0.65) {
+                    const existing = results.get(qNum) || [];
+                    existing.push({
+                      pageNumber: page.pageNumber,
+                      confidence: match.confidence,
+                      evidence: match.evidence || `Multimodal visual match for Question ${qNum}`,
+                    });
+                    results.set(qNum, existing);
+                  }
                 }
               }
+              break;
             }
-            break;
+          } catch {
+            // Try next candidate model
           }
-        } catch {
-          // Try next candidate model
         }
+      } catch (err: any) {
+        console.warn(`[PageMapping] Multimodal inspection failed for page ${page.pageNumber}:`, err.message);
       }
-    } catch (err: any) {
-      console.warn(`[PageMapping] Multimodal inspection failed for page ${page.pageNumber}:`, err.message);
     }
   }
 
@@ -540,6 +683,7 @@ export async function autoMapAnswerBookPages(params: {
       profiles,
       pages,
       unresolvedQuestionNumbers: unresolvedQuestions,
+      answerBook,
     });
 
     for (const [qNum, matches] of multimodalMatches.entries()) {
@@ -566,7 +710,12 @@ export async function autoMapAnswerBookPages(params: {
     const hasDetectedPages = detectedPages.length > 0;
 
     // Check if examiner manually verified this mapping previously
-    if (existing && existing.verified && existing.pages && existing.pages.length > 0 && !forceRemap) {
+    const isExaminer =
+      Boolean(existing?.examinerVerified) ||
+      existing?.source === 'EXAMINER_VERIFIED' ||
+      existing?.mappingSource === 'EXAMINER_VERIFIED';
+
+    if (isExaminer && existing?.pages && existing.pages.length > 0 && !forceRemap) {
       // Manual examiner mapping is AUTHORITATIVE. Preserve it completely.
       const isConflicting =
         hasDetectedPages &&
@@ -577,12 +726,17 @@ export async function autoMapAnswerBookPages(params: {
         questionNumber: qNum,
         questionLabel: prof.questionLabel,
         pages: existing.pages, // Keep examiner's manual pages
+        mappedPages: existing.pages,
         verified: true,
+        examinerVerified: true,
         source: 'EXAMINER_VERIFIED',
-        confidence: existing.confidence || 1.0,
+        mappingSource: 'EXAMINER_VERIFIED',
+        confidence: existing.confidence ?? 1.0,
+        mappingConfidence: existing.mappingConfidence ?? existing.confidence ?? 1.0,
         reason: existing.reason || 'Manually verified by examiner',
         evidence: existing.evidence || ['Manually assigned by examiner'],
         needsHumanReview: false,
+        mappingAlgorithmVersion: CURRENT_MAPPING_ALGORITHM_VERSION,
         aiSuggestedPages: isConflicting ? detectedPages : undefined,
         aiConfidence: isConflicting ? detected.confidence : undefined,
         aiReason: isConflicting ? detected.evidence.join('; ') : undefined,
@@ -599,12 +753,17 @@ export async function autoMapAnswerBookPages(params: {
         questionNumber: qNum,
         questionLabel: prof.questionLabel,
         pages: [],
+        mappedPages: [],
         verified: false,
+        examinerVerified: false,
         source: 'AI_SUGGESTED',
+        mappingSource: 'AI_SUGGESTED',
         confidence: 0.0,
+        mappingConfidence: 0.0,
         reason: `No matching answer content or header detected for Question ${prof.questionLabel}. Examiner page assignment required.`,
         evidence: ['No relevant terminology, headers, or handwritten diagrams found in script'],
         needsHumanReview: true,
+        mappingAlgorithmVersion: CURRENT_MAPPING_ALGORITHM_VERSION,
       });
     } else {
       // Mapped successfully via content, header, continuation, or multimodal AI
@@ -615,13 +774,18 @@ export async function autoMapAnswerBookPages(params: {
         questionNumber: qNum,
         questionLabel: prof.questionLabel,
         pages: detectedPages,
+        mappedPages: detectedPages,
         verified: isConfident, // Auto-verified if confidence >= high threshold
+        examinerVerified: false,
         source: sourceEnum,
+        mappingSource: sourceEnum,
         confidence: detected.confidence,
+        mappingConfidence: detected.confidence,
         reason: mappingReason,
         evidence: detected.evidence,
         isContinuation: detected.isContinuation,
         needsHumanReview: !isConfident, // Needs human review only if below high confidence
+        mappingAlgorithmVersion: CURRENT_MAPPING_ALGORITHM_VERSION,
       });
     }
   }

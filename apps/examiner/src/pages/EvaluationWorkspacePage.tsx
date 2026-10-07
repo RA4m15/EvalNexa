@@ -172,6 +172,18 @@ export function EvaluationWorkspacePage() {
     const handleMappingUpdated = (payload: { answerBookId?: string; mappings?: QuestionPageMapping[] }) => {
       const bookId = (evaluation?.answerBookId as any)?._id || evaluation?.answerBookId || id;
       if (!payload.answerBookId || payload.answerBookId === id || payload.answerBookId === bookId) {
+        if (payload.mappings && Array.isArray(payload.mappings)) {
+          queryClient.setQueryData(['paper', id], (old: any) => {
+            if (!old) return old;
+            return {
+              ...old,
+              answerBook: {
+                ...old.answerBook,
+                questionPageMapping: payload.mappings,
+              },
+            };
+          });
+        }
         queryClient.invalidateQueries({ queryKey: ['paper', id] });
         queryClient.invalidateQueries({ queryKey: ['evaluation', id] });
       }
@@ -485,6 +497,35 @@ export function EvaluationWorkspacePage() {
   }, [activeQIndex]);
 
   const activeQuestion = activeQuestions[activeQIndex] || activeQuestions[0];
+  const activeMapping = answerBook?.questionPageMapping?.find(
+    (m) => m.questionNumber === activeQuestion?.questionNumber
+  );
+
+  useEffect(() => {
+    console.log('[EvaluationWorkspace Runtime Trace]', {
+      evaluationId: evaluation?._id,
+      answerBookId: answerBook?._id,
+      questionPaperId: questionPaper?._id,
+      activeQuestion: activeQuestion
+        ? {
+            number: activeQuestion.questionNumber,
+            text: activeQuestion.text,
+            maximumMarks: activeQuestion.maximumMarks,
+          }
+        : null,
+      'activeQuestion.maximumMarks': activeQuestion?.maximumMarks,
+      'activeQuestion.mapping': activeMapping,
+      mappingAlgorithmVersion: activeMapping?.mappingAlgorithmVersion,
+    });
+  }, [
+    evaluation?._id,
+    answerBook?._id,
+    questionPaper?._id,
+    activeQuestion?.questionNumber,
+    activeQuestion?.maximumMarks,
+    activeMapping,
+  ]);
+
   const activeMarkItem = marksState.find((m) => m.questionNumber === activeQuestion?.questionNumber) || {
     questionNumber: activeQuestion?.questionNumber || 1,
     marks: 0,
@@ -1150,7 +1191,8 @@ export function EvaluationWorkspacePage() {
 
           <div style={{ height: 20, width: 1, background: 'var(--border)' }} />
           <div style={{ fontSize: 14, color: 'var(--charcoal)' }}>
-            Exam: <strong>{exam ? exam.title : 'Examination'}</strong> ({exam?.subjectCode})
+            Exam: <strong>{questionPaper?.paperSet ? `${questionPaper.paperSet}` : (exam ? exam.title : 'Examination')}</strong>
+            {exam?.subjectCode ? ` (${exam.subjectCode})` : ''}
           </div>
         </div>
 
